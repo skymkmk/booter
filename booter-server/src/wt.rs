@@ -35,7 +35,7 @@ pub async fn start_wt_server(state: AppState) {
     transport_config.initial_mtu(1200);
     server_config.transport_config(std::sync::Arc::new(transport_config));
 
-    let endpoint = match Endpoint::server(server_config, "0.0.0.0:8080".parse().unwrap()) {
+    let endpoint = match Endpoint::server(server_config, "[::]:8080".parse().unwrap()) {
         Ok(ep) => ep,
         Err(e) => {
             warn!("Failed to bind WebTransport on UDP 8080: {}", e);

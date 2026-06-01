@@ -35,7 +35,7 @@ pub async fn start_quic_server(state: AppState) {
     transport_config.initial_mtu(1200);
     server_config.transport_config(std::sync::Arc::new(transport_config));
 
-    let endpoint = match quinn::Endpoint::server(server_config, "0.0.0.0:8081".parse().unwrap()) {
+    let endpoint = match quinn::Endpoint::server(server_config, "[::]:8081".parse().unwrap()) {
         Ok(ep) => ep,
         Err(e) => {
             error!("Failed to start QUIC server on UDP 8081: {}", e);
