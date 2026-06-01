@@ -120,6 +120,7 @@ async fn handle_wt_session(session: Session, state: AppState) {
                         let dash_id = dash_id.clone();
                         let state = state.clone();
                         let dashboards = state.dashboards.clone();
+                        let tx = tx.clone();
                         tokio::spawn(async move {
                             use tokio::io::AsyncBufReadExt;
                             let mut buf_reader = tokio::io::BufReader::new(recv_stream);
@@ -131,6 +132,22 @@ async fn handle_wt_session(session: Session, state: AppState) {
                                         if let Ok(msg) = serde_json::from_str::<DashboardToServer>(&line) {
                                             match msg {
                                                 DashboardToServer::Command { target_id, cmd } => {
+                                                    if cmd == "shutdown" {
+                                                        let active_services = state.active_services.lock().await;
+                                                        let has_active = if let Some(cid) = &target_id {
+                                                            active_services.get(cid).map(|m| !m.is_empty()).unwrap_or(false)
+                                                        } else {
+                                                            active_services.values().any(|m| !m.is_empty())
+                                                        };
+                                                        if has_active {
+                                                            let _ = tx.send(ServerToDashboard::CommandResult { 
+                                                                success: false, 
+                                                                message: "当前有服务在线，拒绝执行关机指令".into() 
+                                                            }).await;
+                                                            continue;
+                                                        }
+                                                    }
+
                                                     info!("Dashboard {} requested command: {:?}", dash_id, cmd);
                                                     let c_map = state.companions.lock().await;
                                                     for (cid, sender) in c_map.iter() {
