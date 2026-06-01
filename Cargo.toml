@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "booter-server",
+    "booter-companion",
+    "booter-common"
+]
+resolver = "2"

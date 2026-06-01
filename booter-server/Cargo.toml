@@ -1,0 +1,37 @@
+[package]
+name = "booter-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+axum = { version = "0.8.9", features = ["macros", "ws"] }
+base64 = "0.22.1"
+config = "0.15.23"
+flate2 = "1.1.9"
+futures-util = "0.3.32"
+lettre = { version = "0.11.22", features = ["tokio1", "tokio1-native-tls", "tracing"] }
+mime_guess = "2.0"
+rand = "0.8"
+rc4 = "0.2.0"
+reqwest = { version = "0.13.4", features = ["json", "cookies", "form"] }
+
+booter-common = { path = "../booter-common" }
+quinn = "0.11"
+tokio-util = { version = "0.7", features = ["codec"] }
+rcgen = "0.13"
+rustls = "0.23"
+rustls-pemfile = "2.1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+sha1 = "0.11.0"
+sha2 = "0.11.0"
+sqlx = { version = "0.9.0", features = ["sqlite", "runtime-tokio", "macros"] }
+uuid = { version = "1.0", features = ["v4"] }
+tokio = { version = "1.52.3", features = ["full"] }
+totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
+tower-http = { version = "0.6.11", features = ["fs", "trace"] }
+web-transport-quinn = "0.11.9"
+include_dir = "0.7.4"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+time = { version = "0.3.47", features = ["parsing", "macros", "local-offset"] }
