@@ -498,10 +498,16 @@ async fn request_startup(
             if !forbidden_str.trim().is_empty() {
                 if let Some((start_str, end_str)) = forbidden_str.split_once('-') {
                     let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc()).time();
-                    let format = time::format_description::parse("[hour]:[minute]").unwrap();
-                    if let (Ok(start), Ok(end)) = (
-                        time::Time::parse(start_str.trim(), &format),
-                        time::Time::parse(end_str.trim(), &format)
+                    let parse_time = |s: &str| -> Option<time::Time> {
+                        let mut parts = s.trim().split(':');
+                        let h: u8 = parts.next()?.parse().ok()?;
+                        let m: u8 = parts.next()?.parse().ok()?;
+                        time::Time::from_hms(h, m, 0).ok()
+                    };
+                    
+                    if let (Some(start), Some(end)) = (
+                        parse_time(start_str),
+                        parse_time(end_str)
                     ) {
                         let is_forbidden = if start <= end {
                             now >= start && now <= end
