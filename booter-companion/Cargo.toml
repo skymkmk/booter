@@ -17,3 +17,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 hostname = "0.4.2"
 rhai = { version = "1.25.1", features = ["sync", "serde"] }
 ureq = { version = "2.9", features = ["json"] }
+rustls-native-certs = "0.8.3"

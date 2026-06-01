@@ -233,6 +233,7 @@ dependencies = [
  "quinn 0.10.2",
  "rhai",
  "rustls 0.21.12",
+ "rustls-native-certs 0.8.3",
  "serde",
  "serde_json",
  "tokio",

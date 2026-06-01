@@ -1,0 +1,33 @@
+[Unit]
+Description=Booter Server Daemon
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 建议不要使用 root 运行，可修改为对应的普通用户（例如 booter）
+User=root
+Group=root
+
+# 请将此处的路径修改为您实际部署时的路径
+WorkingDirectory=/opt/booter
+ExecStart=/opt/booter/booter-server
+
+# 如果您有环境变量需要配置，可以取消注释并修改
+# Environment="BOOTER_ENV=production"
+# 或者指定包含环境变量的文件
+# EnvironmentFile=/opt/booter/.env
+
+# 日志级别配置
+Environment="RUST_LOG=info,booter_server=debug"
+
+# 崩溃或退出后自动重启
+Restart=always
+RestartSec=5
+
+# 一些安全和限制配置（可选）
+LimitNOFILE=65535
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target
