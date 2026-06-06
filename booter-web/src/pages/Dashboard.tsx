@@ -257,10 +257,11 @@ export default function Dashboard() {
         </div>
 
         {role === 'admin' && (
-          <AdminDelayShutdown />
+          <>
+            <AdminDelayShutdown />
+            <LogsPanel />
+          </>
         )}
-        
-        <LogsPanel />
       </div>
     </div>
   );
