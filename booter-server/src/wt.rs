@@ -141,7 +141,7 @@ async fn handle_wt_session(session: Session, state: AppState) {
                     let rx_task = {
                         let dash_id = dash_id.clone();
                         let state = state.clone();
-                        let _dashboards = state.dashboards.clone();
+                        let dashboards = state.dashboards.clone();
                         let tx = tx.clone();
                         tokio::spawn(async move {
                             loop {
