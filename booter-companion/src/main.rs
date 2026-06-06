@@ -313,7 +313,7 @@ async fn run_client(
         }
     });
 
-    let mut sigterm = async {
+    let sigterm = async {
         #[cfg(unix)]
         {
             let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
