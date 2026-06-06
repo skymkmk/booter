@@ -8,18 +8,37 @@ use tokio::time::{Duration, sleep};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tracing::{error, info, warn};
 
+#[derive(Debug)]
 struct DangerVerifier;
-impl rustls::client::ServerCertVerifier for DangerVerifier {
+impl rustls::client::danger::ServerCertVerifier for DangerVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &rustls::Certificate,
-        _intermediates: &[rustls::Certificate],
-        _server_name: &rustls::ServerName,
-        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: std::time::SystemTime,
-    ) -> Result<rustls::client::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::ServerCertVerified::assertion())
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -116,7 +135,7 @@ async fn run_client(
     let mut root_store = rustls::RootCertStore::empty();
     let cert_result = rustls_native_certs::load_native_certs();
     for cert in cert_result.certs {
-        let _ = root_store.add(&rustls::Certificate(cert.to_vec()));
+        let _ = root_store.add(cert);
     }
     if !cert_result.errors.is_empty() {
         warn!("Some errors occurred while loading native certificates: {:?}", cert_result.errors);
@@ -124,15 +143,20 @@ async fn run_client(
         info!("Successfully loaded native root certificates.");
     }
 
-    let mut client_crypto = rustls::ClientConfig::builder()
-        .with_safe_defaults()
+    let provider = rustls::crypto::ring::default_provider();
+    let mut client_crypto = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+        .with_safe_default_protocol_versions()
+        .unwrap()
         .with_root_certificates(root_store)
         .with_no_client_auth();
 
     if allow_insecure {
         info!("WARNING: allow_insecure is TRUE. Skipping TLS certificate validation!");
-        client_crypto = rustls::ClientConfig::builder()
-            .with_safe_defaults()
+        let provider = rustls::crypto::ring::default_provider();
+        client_crypto = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .dangerous()
             .with_custom_certificate_verifier(Arc::new(DangerVerifier))
             .with_no_client_auth();
     } else {
@@ -142,7 +166,7 @@ async fn run_client(
     client_crypto.alpn_protocols = vec![b"h3".to_vec()];
 
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())?;
-    let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
+    let mut client_config = quinn::ClientConfig::new(Arc::new(quinn::crypto::rustls::QuicClientConfig::try_from(client_crypto).unwrap()));
     let mut transport_config = quinn::TransportConfig::default();
     transport_config.max_idle_timeout(Some(
         std::time::Duration::from_secs(120).try_into().unwrap(),
