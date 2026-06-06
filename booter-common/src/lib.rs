@@ -4,6 +4,7 @@ use std::collections::HashMap;
 /// Messages sent from the Companion to the Server
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "payload")]
+#[serde(rename_all = "snake_case")]
 pub enum CompanionToServer {
     Hello {
         client_id: String,
@@ -22,6 +23,7 @@ pub enum CompanionToServer {
 /// Messages sent from the Server to the Companion
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "payload")]
+#[serde(rename_all = "snake_case")]
 pub enum ServerToCompanion {
     Command {
         target_id: Option<String>,
@@ -35,7 +37,11 @@ pub enum ServerToCompanion {
 /// Messages sent from the Dashboard to the Server
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "payload")]
+#[serde(rename_all = "snake_case")]
 pub enum DashboardToServer {
+    Auth {
+        token: String,
+    },
     Command {
         target_id: Option<String>,
         cmd: String,
@@ -45,6 +51,7 @@ pub enum DashboardToServer {
 /// Messages sent from the Server to the Dashboard
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "payload")]
+#[serde(rename_all = "snake_case")]
 pub enum ServerToDashboard {
     NodeStatus {
         online_count: usize,

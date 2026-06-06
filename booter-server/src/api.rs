@@ -16,16 +16,19 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/auth/email/request", post(request_email_code))
         .route("/api/v1/auth/email/verify", post(verify_email_code))
         .route("/api/v1/auth/admin/totp", post(totp_verify))
-        .route("/api/v1/admin/autoshutdown", get(get_autoshutdown).post(set_autoshutdown))
+        .route("/api/v1/auth/me", get(auth_me))
+        .route("/api/v1/admin/auto-shutdown", get(get_autoshutdown).post(set_autoshutdown))
         .route("/api/v1/admin/mijia/status", get(mijia_status))
         .route("/api/v1/admin/mijia/qr/start", get(mijia_qr_start))
         .route("/api/v1/admin/mijia/qr/poll", post(mijia_qr_poll))
         .route("/api/v1/admin/mijia/devices", get(mijia_devices))
         .route("/api/v1/admin/mijia/devices/select", post(mijia_select_device))
-        .route("/api/v1/admin/boot_restrictions", get(get_boot_restrictions).post(set_boot_restrictions))
+        .route("/api/v1/admin/boot-restrictions", get(get_boot_restrictions).post(set_boot_restrictions))
         .route("/api/v1/admin/users", get(get_users).post(add_user))
         .route("/api/v1/admin/users/{email}", delete(delete_user))
-
+        .route("/api/v1/admin/sessions", get(get_sessions))
+        .route("/api/v1/admin/sessions/{token}", delete(delete_session))
+        .route("/api/v1/admin/logs", get(get_logs))
         .route("/api/v1/system/start", post(request_startup))
         .route("/api/v1/system/turnstile", get(get_turnstile_config))
         .route("/api/v1/admin/delay", post(admin_delay_shutdown))
@@ -56,18 +59,32 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
     }
 }
 
-pub async fn verify_admin_token(token: &str, db: &sqlx::SqlitePool) -> bool {
-    let record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'admin_session'")
-        .fetch_optional(db)
-        .await
-        .unwrap_or(None);
-        
-    if let Some((stored_token,)) = record {
-        if stored_token == token {
-            return true;
+pub async fn verify_token_impl(token: &str, expected_role: Option<&str>, db: &sqlx::SqlitePool) -> Option<(String, String)> {
+    // 1. Fetch valid session (not older than 30 days)
+    let record: Option<(String, String)> = sqlx::query_as(
+        "SELECT role, email FROM sessions WHERE token = ? AND (julianday('now') - julianday(last_used_at)) <= 30"
+    )
+    .bind(token)
+    .fetch_optional(db)
+    .await
+    .unwrap_or(None);
+
+    if let Some((role, email)) = record {
+        if let Some(er) = expected_role {
+            if role != er {
+                return None;
+            }
         }
+        
+        // 2. Slide expiration
+        let _ = sqlx::query("UPDATE sessions SET last_used_at = CURRENT_TIMESTAMP WHERE token = ?")
+            .bind(token)
+            .execute(db)
+            .await;
+            
+        return Some((role, email));
     }
-    false
+    None
 }
 
 pub async fn verify_admin(headers: &HeaderMap, db: &sqlx::SqlitePool) -> bool {
@@ -75,11 +92,22 @@ pub async fn verify_admin(headers: &HeaderMap, db: &sqlx::SqlitePool) -> bool {
         if let Ok(auth_str) = auth_header.to_str() {
             if auth_str.starts_with("Bearer ") {
                 let token = &auth_str[7..];
-                return verify_admin_token(token, db).await;
+                return verify_token_impl(token, Some("admin"), db).await.is_some();
             }
         }
     }
     false
+}
+
+pub async fn extract_token(headers: &HeaderMap) -> Option<String> {
+    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if auth_str.starts_with("Bearer ") {
+                return Some(auth_str[7..].to_string());
+            }
+        }
+    }
+    None
 }
 
 async fn verify_turnstile(secret: &str, token: &str) -> bool {
@@ -139,10 +167,10 @@ async fn totp_verify(
 
     #[derive(sqlx::FromRow)]
     struct AdminRecord {
-        totp_secret: Option<String>,
+        value: Option<String>,
     }
 
-    let record: Option<AdminRecord> = sqlx::query_as("SELECT totp_secret FROM admins LIMIT 1")
+    let record: Option<AdminRecord> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'admin_totp_secret'")
         .fetch_optional(&state.db)
         .await
         .unwrap_or(None);
@@ -156,7 +184,7 @@ async fn totp_verify(
         });
     };
 
-    let Some(secret_str) = admin_record.totp_secret else {
+    let Some(secret_str) = admin_record.value else {
         return Json(AuthResponse {
             success: false,
             token: None,
@@ -186,10 +214,9 @@ async fn totp_verify(
             b64.encode(token_bytes)
         };
 
-        // Store token in system_config
+        // Store token in sessions
         let _ = sqlx::query(
-            "INSERT INTO system_config (key, value) VALUES ('admin_session', ?) 
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP"
+            "INSERT INTO sessions (token, role, email) VALUES (?, 'admin', 'admin')"
         )
         .bind(token_str.clone())
         .execute(&state.db)
@@ -318,21 +345,15 @@ async fn verify_email_code(
     };
 
     // Store token
-    let session_key = format!("user_session_{}", payload.email);
     let _ = sqlx::query(
-        "INSERT INTO system_config (key, value) VALUES (?, ?) 
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP"
+        "INSERT INTO sessions (token, role, email) VALUES (?, 'user', ?)"
     )
-    .bind(session_key)
     .bind(token_str.clone())
+    .bind(&payload.email)
     .execute(&state.db)
     .await;
 
-    // Clear the OTP
-    let _ = sqlx::query("DELETE FROM otps WHERE email = ?")
-        .bind(&payload.email)
-        .execute(&state.db)
-        .await;
+
 
     Json(AuthResponse {
         success: true,
@@ -471,11 +492,17 @@ async fn request_startup(
     headers: HeaderMap,
     State(state): State<AppState>,
 ) -> (axum::http::StatusCode, Json<StartupResponse>) {
-    let Some(_) = headers.get("Authorization") else {
-        return (axum::http::StatusCode::UNAUTHORIZED, Json(StartupResponse { success: false, message: "Missing Authorization header".into() }));
+    let token = match extract_token(&headers).await {
+        Some(t) => t,
+        None => return (axum::http::StatusCode::UNAUTHORIZED, Json(StartupResponse { success: false, message: "Missing or invalid Authorization header".into() })),
     };
     
-    let is_admin = verify_admin(&headers, &state.db).await;
+    let (role, email) = match verify_token_impl(&token, None, &state.db).await {
+        Some(r) => r,
+        None => return (axum::http::StatusCode::UNAUTHORIZED, Json(StartupResponse { success: false, message: "Invalid or expired token".into() })),
+    };
+    
+    let is_admin = role == "admin";
     if !is_admin {
         // Cooldown check
         let cooldown_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_cooldown_minutes'")
@@ -557,6 +584,14 @@ async fn request_startup(
     match client.set_devices_prop(&did, 2, 1, serde_json::json!(true)).await {
         Ok(_) => {
             *state.last_boot_time.lock().await = Some(std::time::Instant::now());
+            
+            if !is_admin {
+                let _ = sqlx::query("INSERT INTO user_logs (email, action) VALUES (?, 'Wakeup')")
+                    .bind(&email)
+                    .execute(&state.db)
+                    .await;
+            }
+            
             crate::quic::broadcast_node_status(&state).await;
             (axum::http::StatusCode::OK, Json(StartupResponse { success: true, message: "Smart plug turned on successfully".into() }))
         },
@@ -735,4 +770,139 @@ async fn mijia_select_device(headers: HeaderMap, State(state): State<AppState>, 
     Json(StartupResponse { success: true, message: "Saved".into() })
 }
 
-async fn admin_delay_shutdown() -> &'static str { "Not implemented" }
+#[derive(Deserialize)]
+pub struct DelayShutdownRequest {
+    pub minutes: i32,
+}
+
+#[axum::debug_handler]
+async fn admin_delay_shutdown(headers: HeaderMap, State(state): State<AppState>, Json(payload): Json<DelayShutdownRequest>) -> Json<StartupResponse> {
+    if !verify_admin(&headers, &state.db).await {
+        return Json(StartupResponse { success: false, message: "Unauthorized".into() });
+    }
+    
+    let mut current_deadline = state.node_shutdown_deadline.lock().await;
+    let base_time = current_deadline.unwrap_or_else(|| std::time::Instant::now());
+    
+    let new_deadline = if payload.minutes >= 0 {
+        base_time + std::time::Duration::from_secs(payload.minutes as u64 * 60)
+    } else {
+        let sub = std::time::Duration::from_secs(payload.minutes.abs() as u64 * 60);
+        if let Some(t) = base_time.checked_sub(sub) { t } else { std::time::Instant::now() }
+    };
+    
+    // Ensure deadline isn't past
+    if new_deadline < std::time::Instant::now() {
+        *current_deadline = Some(std::time::Instant::now()); // shutdown soon
+    } else {
+        *current_deadline = Some(new_deadline);
+    }
+    
+    Json(StartupResponse { success: true, message: format!("Delay adjusted by {} minutes", payload.minutes) })
+}
+
+#[derive(Serialize)]
+pub struct AuthMeResponse {
+    pub email: String,
+    pub role: String,
+}
+
+#[axum::debug_handler]
+async fn auth_me(headers: HeaderMap, State(state): State<AppState>) -> (axum::http::StatusCode, Json<Option<AuthMeResponse>>) {
+    if let Some(token) = extract_token(&headers).await {
+        if let Some((role, email)) = verify_token_impl(&token, None, &state.db).await {
+            return (axum::http::StatusCode::OK, Json(Some(AuthMeResponse { email, role })));
+        }
+    }
+    (axum::http::StatusCode::UNAUTHORIZED, Json(None))
+}
+
+#[derive(Serialize)]
+pub struct SessionItem {
+    pub token: String,
+    pub role: String,
+    pub email: String,
+    pub created_at: String,
+    pub last_used_at: String,
+}
+
+#[derive(Serialize)]
+pub struct SessionsResponse {
+    pub success: bool,
+    pub sessions: Vec<SessionItem>,
+}
+
+#[axum::debug_handler]
+async fn get_sessions(headers: HeaderMap, State(state): State<AppState>) -> Json<SessionsResponse> {
+    if !verify_admin(&headers, &state.db).await {
+        return Json(SessionsResponse { success: false, sessions: vec![] });
+    }
+    
+    let records: Vec<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT token, role, email, datetime(created_at, 'localtime'), datetime(last_used_at, 'localtime') FROM sessions ORDER BY last_used_at DESC"
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    
+    let sessions = records.into_iter().map(|r| SessionItem {
+        token: r.0, role: r.1, email: r.2, created_at: r.3, last_used_at: r.4
+    }).collect();
+    
+    Json(SessionsResponse { success: true, sessions })
+}
+
+#[axum::debug_handler]
+async fn delete_session(headers: HeaderMap, axum::extract::Path(token): axum::extract::Path<String>, State(state): State<AppState>) -> Json<StartupResponse> {
+    if !verify_admin(&headers, &state.db).await {
+        return Json(StartupResponse { success: false, message: "Unauthorized".into() });
+    }
+    let _ = sqlx::query("DELETE FROM sessions WHERE token = ?").bind(&token).execute(&state.db).await;
+    Json(StartupResponse { success: true, message: "Session deleted".into() })
+}
+
+#[derive(Serialize)]
+pub struct LogItem {
+    pub id: i64,
+    pub email: String,
+    pub action: String,
+    pub created_at: String,
+}
+
+#[derive(Serialize)]
+pub struct LogsResponse {
+    pub success: bool,
+    pub logs: Vec<LogItem>,
+}
+
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    pub page: Option<u32>,
+}
+
+#[axum::debug_handler]
+async fn get_logs(headers: HeaderMap, axum::extract::Query(query): axum::extract::Query<LogsQuery>, State(state): State<AppState>) -> Json<LogsResponse> {
+    if !verify_admin(&headers, &state.db).await {
+        return Json(LogsResponse { success: false, logs: vec![] });
+    }
+    
+    let page = query.page.unwrap_or(1).max(1);
+    let offset = (page - 1) * 10;
+    
+    // Auto-delete older than 90 days
+    let _ = sqlx::query("DELETE FROM user_logs WHERE (julianday('now') - julianday(created_at)) > 90").execute(&state.db).await;
+    
+    let records: Vec<(i64, String, String, String)> = sqlx::query_as(
+        "SELECT id, email, action, datetime(created_at, 'localtime') FROM user_logs ORDER BY id DESC LIMIT 10 OFFSET ?"
+    )
+    .bind(offset)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    
+    let logs = records.into_iter().map(|r| LogItem {
+        id: r.0, email: r.1, action: r.2, created_at: r.3
+    }).collect();
+    
+    Json(LogsResponse { success: true, logs })
+}

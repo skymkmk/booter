@@ -26,7 +26,7 @@ pub async fn start_quic_server(state: AppState) {
         .with_single_cert(cert_chain, priv_key)
         .unwrap();
 
-    server_crypto.alpn_protocols = vec![b"booter".to_vec()];
+    server_crypto.alpn_protocols = vec![b"h3".to_vec()];
 
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quinn::crypto::rustls::QuicServerConfig::try_from(server_crypto).unwrap()));
     let mut transport_config = quinn::TransportConfig::default();
@@ -35,14 +35,14 @@ pub async fn start_quic_server(state: AppState) {
     transport_config.initial_mtu(1200);
     server_config.transport_config(std::sync::Arc::new(transport_config));
 
-    let endpoint = match quinn::Endpoint::server(server_config, "[::]:8081".parse().unwrap()) {
+    let endpoint = match quinn::Endpoint::server(server_config, "[::]:2693".parse().unwrap()) {
         Ok(ep) => ep,
         Err(e) => {
-            error!("Failed to start QUIC server on UDP 8081: {}", e);
+            error!("Failed to bind QUIC on UDP 2693: {}", e);
             return;
         }
     };
-    info!("Starting Raw QUIC server on UDP 8081 for Companions");
+    info!("Starting QUIC server on UDP 2693 for Companions");
 
     let state_bg = state.clone();
     tokio::spawn(async move {

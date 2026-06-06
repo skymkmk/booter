@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         tracing::info!("Resetting admin TOTP...");
         let secret = totp_rs::Secret::generate_secret();
         let secret_str = secret.to_encoded().to_string();
-        sqlx::query("INSERT INTO admins (id, totp_secret) VALUES (1, ?) ON CONFLICT(id) DO UPDATE SET totp_secret = excluded.totp_secret")
+        sqlx::query("INSERT INTO system_config (key, value) VALUES ('admin_totp_secret', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
             .bind(&secret_str)
             .execute(&db_pool).await?;
         

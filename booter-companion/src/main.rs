@@ -139,7 +139,7 @@ async fn run_client(
         info!("Using strict TLS with native root certificates.");
     }
 
-    client_crypto.alpn_protocols = vec![b"booter".to_vec()];
+    client_crypto.alpn_protocols = vec![b"h3".to_vec()];
 
     let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse().unwrap())?;
     let mut client_config = quinn::ClientConfig::new(Arc::new(client_crypto));
@@ -152,12 +152,12 @@ async fn run_client(
     client_config.transport_config(std::sync::Arc::new(transport_config));
     endpoint.set_default_client_config(client_config);
 
-    let server_addr_str = format!("{}:8081", server_host);
+    let server_addr_str = format!("{}:2693", server_host);
     let server_addr = tokio::net::lookup_host(&server_addr_str)
         .await?
         .next()
         .ok_or(format!("Failed to resolve host: {}", server_host))?;
-    info!("Connecting to Raw QUIC server at {}...", server_addr);
+    info!("Connecting to QUIC server at {}...", server_addr);
 
     let server_name =
         std::env::var("BOOTER_SERVER_NAME").unwrap_or_else(|_| server_host.to_string());

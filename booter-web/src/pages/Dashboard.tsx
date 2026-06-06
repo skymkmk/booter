@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
+import { LogsPanel } from '../components/LogsPanel';
+import { AdminDelayShutdown } from '../components/AdminDelayShutdown';
 import { AmbientBackground } from "../components/AmbientBackground";
 import { GlassCard } from "../components/GlassCard";
 import { useAuth } from "../context/AuthContext";
@@ -14,6 +16,8 @@ export default function Dashboard() {
   const [forbiddenTime, setForbiddenTime] = useState<string | null>(null);
   const [cooldownDeadline, setCooldownDeadline] = useState<number | null>(null);
   const [cooldownCountdown, setCooldownCountdown] = useState<string>('');
+  
+  const [confirmWake, setConfirmWake] = useState(false);
 
   const handleMessage = useCallback((msg: any) => {
     if (msg.type === 'NodeStatus') {
@@ -79,21 +83,24 @@ export default function Dashboard() {
   };
 
   const handleWake = async () => {
+    if (!confirmWake) {
+      setConfirmWake(true);
+      return;
+    }
+    
     try {
       const data = await fetchClient('/api/v1/system/start', { 
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
+        method: 'POST'
       });
       if (data.success) {
         toast.success("唤醒指令已下发至米家终端！");
+        setConfirmWake(false);
       } else {
         toast.error(`唤醒失败: ${data.message || '未知错误'}`);
+        setConfirmWake(false);
       }
     } catch (e: any) {
       console.error(e);
-      toast.error(`网络错误: ${e.message}`);
     }
   };
 
@@ -215,11 +222,25 @@ export default function Dashboard() {
               {!isOnline ? (
                 <button
                   onClick={handleWake}
-                  className="w-full h-full min-h-[200px] bg-emerald-50 dark:bg-emerald-950/30 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border border-emerald-200 dark:border-emerald-800/50 rounded-2xl flex items-center justify-center transition-all group"
+                  onMouseLeave={() => setConfirmWake(false)}
+                  className={`w-full h-full min-h-[200px] border rounded-2xl flex flex-col items-center justify-center transition-all group ${
+                    confirmWake 
+                      ? 'bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-900/50 border-amber-200 dark:border-amber-800/50' 
+                      : 'bg-emerald-50 dark:bg-emerald-950/30 hover:bg-emerald-100 dark:hover:bg-emerald-900/50 border-emerald-200 dark:border-emerald-800/50'
+                  }`}
                 >
-                  <span className="text-emerald-600 dark:text-emerald-400 font-bold text-4xl tracking-widest group-hover:scale-110 transition-transform">
-                    唤醒电脑
+                  <span className={`font-bold tracking-widest transition-transform ${
+                    confirmWake 
+                      ? 'text-amber-600 dark:text-amber-400 text-3xl' 
+                      : 'text-emerald-600 dark:text-emerald-400 text-4xl group-hover:scale-110'
+                  }`}>
+                    {confirmWake ? "点击确认开机" : "唤醒电脑"}
                   </span>
+                  {confirmWake && (
+                    <span className="text-amber-600/70 dark:text-amber-400/70 mt-4 text-sm tracking-wide">
+                      (移开鼠标取消)
+                    </span>
+                  )}
                 </button>
               ) : (
                 <button
@@ -234,6 +255,12 @@ export default function Dashboard() {
             </div>
           </GlassCard>
         </div>
+
+        {role === 'admin' && (
+          <AdminDelayShutdown />
+        )}
+        
+        <LogsPanel />
       </div>
     </div>
   );

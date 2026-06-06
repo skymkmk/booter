@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { AmbientBackground } from '../components/AmbientBackground';
 import { GlassCard } from '../components/GlassCard';
 import { CompanionsPanel } from '../components/CompanionsPanel';
+import { SessionsPanel } from '../components/SessionsPanel';
 import { useAuth } from '../context/AuthContext';
 import { fetchClient } from '../utils/fetchClient';
 
@@ -465,6 +466,7 @@ export default function Admin() {
             </GlassCard>
             
             <CompanionsPanel token={token} />
+            <SessionsPanel />
           </div>
         </div>
       </div>

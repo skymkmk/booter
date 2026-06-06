@@ -1,8 +1,27 @@
 import { toast } from 'sonner';
 
 export async function fetchClient(input: RequestInfo | URL, init?: RequestInit): Promise<any> {
+    const token = localStorage.getItem('booter_token');
+    
+    let modifiedInit = init || {};
+    if (token) {
+        modifiedInit.headers = {
+            ...modifiedInit.headers,
+            'Authorization': `Bearer ${token}`
+        };
+    }
+
     try {
-        const response = await fetch(input, init);
+        const response = await fetch(input, modifiedInit);
+        
+        if (response.status === 401) {
+            localStorage.removeItem('booter_token');
+            localStorage.removeItem('booter_role');
+            if (window.location.pathname !== '/login' && window.location.pathname !== '/admin/login') {
+                window.location.href = '/login';
+            }
+            throw new Error("会话已过期，请重新登录");
+        }
         
         let data = null;
         try {

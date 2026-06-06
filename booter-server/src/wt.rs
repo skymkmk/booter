@@ -73,10 +73,31 @@ async fn handle_wt_session(session: Session, state: AppState) {
             Ok((mut send_stream, recv_stream)) => {
                 let state = state.clone();
                 tokio::spawn(async move {
+                    use tokio::io::AsyncBufReadExt;
+                    let mut buf_reader = tokio::io::BufReader::new(recv_stream);
+                    let mut first_line = String::new();
+                    
+                    if buf_reader.read_line(&mut first_line).await.is_err() || first_line.is_empty() {
+                        return;
+                    }
+                    
+                    let is_authenticated = match serde_json::from_str::<DashboardToServer>(&first_line) {
+                        Ok(DashboardToServer::Auth { token }) => {
+                            crate::api::verify_token_impl(&token, None, &state.db).await.is_some()
+                        },
+                        _ => false,
+                    };
+                    
+                    if !is_authenticated {
+                        warn!("WebTransport stream authentication failed");
+                        let _ = send_stream.write_all(b"{\"type\":\"command_result\",\"payload\":{\"success\":false,\"message\":\"Authentication failed\"}}\n").await;
+                        return;
+                    }
+                    
                     let (tx, mut rx) = mpsc::channel::<ServerToDashboard>(32);
                     let dash_id = uuid::Uuid::new_v4().to_string();
                     state.dashboards.lock().await.insert(dash_id.clone(), tx.clone());
-                    info!("Dashboard connected: {}", dash_id);
+                    info!("Dashboard authenticated and connected: {}", dash_id);
 
                     let c_len = state.companions.lock().await.len();
                     let deadline_opt = *state.node_shutdown_deadline.lock().await;
@@ -120,11 +141,9 @@ async fn handle_wt_session(session: Session, state: AppState) {
                     let rx_task = {
                         let dash_id = dash_id.clone();
                         let state = state.clone();
-                        let dashboards = state.dashboards.clone();
+                        let _dashboards = state.dashboards.clone();
                         let tx = tx.clone();
                         tokio::spawn(async move {
-                            use tokio::io::AsyncBufReadExt;
-                            let mut buf_reader = tokio::io::BufReader::new(recv_stream);
                             loop {
                                 let mut line = String::new();
                                 match buf_reader.read_line(&mut line).await {
@@ -157,6 +176,9 @@ async fn handle_wt_session(session: Session, state: AppState) {
                                                             let _ = sender.send(ServerToCompanion::Command { target_id: target_id.clone(), cmd: cmd.clone() }).await;
                                                         }
                                                     }
+                                                },
+                                                DashboardToServer::Auth { .. } => {
+                                                    // Already handled during handshake
                                                 }
                                             }
                                         }

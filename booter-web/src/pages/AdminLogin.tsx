@@ -17,6 +17,18 @@ export default function AdminLogin() {
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
 
   React.useEffect(() => {
+    // Route pre-check
+    const token = localStorage.getItem("booter_token");
+    if (token) {
+      fetchClient("/api/v1/auth/me")
+        .then(() => {
+          navigate("/dashboard");
+        })
+        .catch(() => {
+          // Token is invalid, fetchClient will clear it automatically
+        });
+    }
+
     fetchClient("/api/v1/system/turnstile")
       .then((data) => {
         if (data.site_key) {
@@ -24,7 +36,7 @@ export default function AdminLogin() {
         }
       })
       .catch((err) => console.error("Failed to load Turnstile config", err));
-  }, []);
+  }, [navigate]);
 
   const handleVerifyTotp = async (e: React.FormEvent) => {
     e.preventDefault();
