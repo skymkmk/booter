@@ -170,12 +170,19 @@ async fn handle_wt_session(session: Session, state: AppState) {
 
                                                     info!("Dashboard {} requested command: {:?}", dash_id, cmd);
                                                     let c_map = state.companions.lock().await;
+                                                    let mut sent_count = 0;
                                                     for (cid, sender) in c_map.iter() {
                                                         if target_id.is_none() || target_id.as_ref() == Some(cid) {
                                                             info!("Forwarding command to companion {}", cid);
                                                             let _ = sender.send(ServerToCompanion::Command { target_id: target_id.clone(), cmd: cmd.clone() }).await;
+                                                            sent_count += 1;
                                                         }
                                                     }
+                                                    
+                                                    let _ = tx.send(ServerToDashboard::CommandResult {
+                                                        success: true,
+                                                        message: format!("已成功向 {} 个节点发送指令", sent_count),
+                                                    }).await;
                                                 },
                                                 DashboardToServer::Auth { .. } => {
                                                     // Already handled during handshake

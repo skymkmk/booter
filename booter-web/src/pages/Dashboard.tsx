@@ -18,6 +18,7 @@ export default function Dashboard() {
   const [cooldownCountdown, setCooldownCountdown] = useState<string>('');
   
   const [confirmWake, setConfirmWake] = useState(false);
+  const [confirmShutdown, setConfirmShutdown] = useState(false);
 
   const handleMessage = useCallback((msg: any) => {
     if (msg.type === 'node_status') {
@@ -79,7 +80,12 @@ export default function Dashboard() {
   }, [cooldownDeadline, isOnline]);
 
   const handleShutdown = () => {
+    if (!confirmShutdown) {
+      setConfirmShutdown(true);
+      return;
+    }
     sendMessage({ type: 'command', payload: { target_id: null, cmd: 'shutdown' } });
+    setConfirmShutdown(false);
   };
 
   const handleWake = async () => {
@@ -223,6 +229,7 @@ export default function Dashboard() {
                 <button
                   onClick={handleWake}
                   onMouseLeave={() => setConfirmWake(false)}
+                  onBlur={() => setConfirmWake(false)}
                   className={`w-full h-full min-h-[200px] border rounded-2xl flex flex-col items-center justify-center transition-all group ${
                     confirmWake 
                       ? 'bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-900/50 border-amber-200 dark:border-amber-800/50' 
@@ -238,18 +245,33 @@ export default function Dashboard() {
                   </span>
                   {confirmWake && (
                     <span className="text-amber-600/70 dark:text-amber-400/70 mt-4 text-sm tracking-wide">
-                      (移开鼠标取消)
+                      (点击空白处取消)
                     </span>
                   )}
                 </button>
               ) : (
                 <button
                   onClick={handleShutdown}
-                  className="w-full h-full min-h-[200px] bg-rose-50 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-900/50 border border-rose-200 dark:border-rose-800/50 rounded-2xl flex items-center justify-center transition-all group"
+                  onMouseLeave={() => setConfirmShutdown(false)}
+                  onBlur={() => setConfirmShutdown(false)}
+                  className={`w-full h-full min-h-[200px] border rounded-2xl flex flex-col items-center justify-center transition-all group ${
+                    confirmShutdown 
+                      ? 'bg-rose-100 dark:bg-rose-900/50 border-rose-300 dark:border-rose-700/50' 
+                      : 'bg-rose-50 dark:bg-rose-950/30 hover:bg-rose-100 dark:hover:bg-rose-900/50 border-rose-200 dark:border-rose-800/50'
+                  }`}
                 >
-                  <span className="text-rose-600 dark:text-rose-400 font-bold text-4xl tracking-widest group-hover:scale-110 transition-transform">
-                    关机
+                  <span className={`font-bold tracking-widest transition-transform ${
+                    confirmShutdown 
+                      ? 'text-rose-700 dark:text-rose-300 text-3xl' 
+                      : 'text-rose-600 dark:text-rose-400 text-4xl group-hover:scale-110'
+                  }`}>
+                    {confirmShutdown ? "点击确认关机" : "关机"}
                   </span>
+                  {confirmShutdown && (
+                    <span className="text-rose-700/70 dark:text-rose-300/70 mt-4 text-sm tracking-wide">
+                      (点击空白处取消)
+                    </span>
+                  )}
                 </button>
               )}
             </div>

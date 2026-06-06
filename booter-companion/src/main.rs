@@ -313,6 +313,25 @@ async fn run_client(
         }
     });
 
+    let mut sigterm = async {
+        #[cfg(unix)]
+        {
+            let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+            sig.recv().await;
+        }
+        #[cfg(windows)]
+        {
+            let mut sig1 = tokio::signal::windows::ctrl_close().unwrap();
+            let mut sig2 = tokio::signal::windows::ctrl_shutdown().unwrap();
+            let mut sig3 = tokio::signal::windows::ctrl_logoff().unwrap();
+            tokio::select! {
+                _ = sig1.recv() => {}
+                _ = sig2.recv() => {}
+                _ = sig3.recv() => {}
+            }
+        }
+    };
+
     tokio::select! {
         _ = &mut send_task => {
             recv_task.abort();
@@ -328,7 +347,15 @@ async fn run_client(
                 client_id: client_id.to_string(),
             };
             let _ = tx.send(bye).await;
-            // Allow a short time for the send_task to process and flush
+            sleep(Duration::from_millis(500)).await;
+            std::process::exit(0);
+        },
+        _ = sigterm => {
+            info!("Received System Termination Signal, sending Bye message...");
+            let bye = CompanionToServer::Bye {
+                client_id: client_id.to_string(),
+            };
+            let _ = tx.send(bye).await;
             sleep(Duration::from_millis(500)).await;
             std::process::exit(0);
         }
