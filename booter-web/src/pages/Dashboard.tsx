@@ -20,12 +20,12 @@ export default function Dashboard() {
   const [confirmWake, setConfirmWake] = useState(false);
 
   const handleMessage = useCallback((msg: any) => {
-    if (msg.type === 'NodeStatus') {
+    if (msg.type === 'node_status') {
       setIsOnline(msg.payload.online_count > 0);
       setShutdownDeadline(msg.payload.shutdown_deadline || null);
       setForbiddenTime(msg.payload.forbidden_time || null);
       setCooldownDeadline(msg.payload.cooldown_deadline || null);
-    } else if (msg.type === 'CommandResult') {
+    } else if (msg.type === 'command_result') {
       if (msg.payload.success) {
         toast.success(msg.payload.message);
       } else {
@@ -79,7 +79,7 @@ export default function Dashboard() {
   }, [cooldownDeadline, isOnline]);
 
   const handleShutdown = () => {
-    sendMessage({ type: 'Command', payload: { target_id: null, cmd: 'shutdown' } });
+    sendMessage({ type: 'command', payload: { target_id: null, cmd: 'shutdown' } });
   };
 
   const handleWake = async () => {

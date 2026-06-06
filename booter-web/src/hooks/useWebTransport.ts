@@ -1,11 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 
 export type DashboardToServer =
-  | { type: "Command"; payload: { target_id: string | null; cmd: string } };
+  | { type: "command"; payload: { target_id: string | null; cmd: string } };
 
 export type ServerToDashboard =
   | {
-      type: "Status";
+      type: "status";
       payload: {
         client_id: string;
         active: boolean;
@@ -13,8 +13,8 @@ export type ServerToDashboard =
         probe_type: string;
       };
     }
-  | { type: "CommandResult"; payload: { success: boolean; message: string } }
-  | { type: "NodeStatus"; payload: { online_count: number, shutdown_deadline: number | null, forbidden_time: string | null, cooldown_deadline: number | null } };
+  | { type: "command_result"; payload: { success: boolean; message: string } }
+  | { type: "node_status"; payload: { online_count: number, shutdown_deadline: number | null, forbidden_time: string | null, cooldown_deadline: number | null } };
 
 export function useWebTransport(token: string | null, onMessage?: (msg: ServerToDashboard) => void) {
   const [isConnected, setIsConnected] = useState(false);
@@ -51,7 +51,7 @@ export function useWebTransport(token: string | null, onMessage?: (msg: ServerTo
       // Authenticate
       if (token) {
         const encoder = new TextEncoder();
-        writer.write(encoder.encode(JSON.stringify({ type: "Hello", payload: { client_id: token } }) + "\n"));
+        writer.write(encoder.encode(JSON.stringify({ type: "auth", payload: { token: token } }) + "\n"));
       }
 
       // 4. Read loop
@@ -74,10 +74,17 @@ export function useWebTransport(token: string | null, onMessage?: (msg: ServerTo
 
           if (line) {
             try {
-              const msg = JSON.parse(line) as ServerToDashboard;
-              setLastMessage(msg);
+              const parsed = JSON.parse(line) as ServerToDashboard;
+                if (parsed.type === "command_result" && !parsed.payload.success && parsed.payload.message === "Authentication failed") {
+                  localStorage.removeItem('booter_token');
+                  localStorage.removeItem('booter_role');
+                  window.location.href = '/login';
+                  return;
+                }
+                
+                setLastMessage(parsed);
               if (onMessage) {
-                onMessage(msg);
+                onMessage(parsed);
               }
             } catch (err) {
               console.error("[WebTransport] Failed to parse message:", line);

@@ -77,7 +77,7 @@ export default function Admin() {
 
     const fetchAutoShutdown = async () => {
       try {
-        const data = await fetchClient('/api/v1/admin/autoshutdown', {
+        const data = await fetchClient('/api/v1/admin/auto-shutdown', {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (data.success) {
@@ -90,7 +90,7 @@ export default function Admin() {
 
     const fetchBootRestrictions = async () => {
       try {
-        const data = await fetchClient('/api/v1/admin/boot_restrictions', {
+        const data = await fetchClient('/api/v1/admin/boot-restrictions', {
           headers: { 'Authorization': `Bearer ${token}` }
         });
         if (data.success) {
@@ -231,7 +231,7 @@ export default function Admin() {
     e.preventDefault();
     setSavingAutoShutdown(true);
     try {
-      await fetchClient('/api/v1/admin/autoshutdown', {
+      await fetchClient('/api/v1/admin/auto-shutdown', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -250,7 +250,7 @@ export default function Admin() {
     e.preventDefault();
     setSavingRestrictions(true);
     try {
-      await fetchClient('/api/v1/admin/boot_restrictions', {
+      await fetchClient('/api/v1/admin/boot-restrictions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
