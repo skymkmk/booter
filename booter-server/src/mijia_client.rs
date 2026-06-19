@@ -225,9 +225,6 @@ impl MijiaClient {
 
     pub async fn qr_login_step2(&mut self, lp_url: &str) -> Result<MijiaAuthData, String> {
         let lp_url = reqwest::Url::parse(lp_url).map_err(|e| format!("Invalid LP URL: {}", e))?;
-        if lp_url.scheme() != "https" || lp_url.host_str() != Some("account.xiaomi.com") {
-            return Err("Unexpected Mijia long-polling URL".into());
-        }
         let res = self
             .client
             .get(lp_url)
