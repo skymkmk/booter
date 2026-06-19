@@ -45,16 +45,6 @@ export default function AdminLogin() {
     setLoading(true);
     setError(null);
 
-    // [MOCK 幻境] 用于前端脱机体验
-    if (totp === "654321") {
-      setTimeout(() => {
-        login("mock_admin_token", "admin");
-        navigate("/admin");
-        setLoading(false);
-      }, 800);
-      return;
-    }
-
     try {
       const data = await fetchClient("/api/v1/auth/admin/totp", {
         method: "POST",
@@ -69,7 +59,7 @@ export default function AdminLogin() {
         setError(data.message || "动态密码错误或失效");
       }
     } catch (err) {
-      setError("网络错误，无法连接到后端服务器（可使用 654321 体验 Mock）");
+      setError("网络错误，无法连接到后端服务器");
     } finally {
       setLoading(false);
     }

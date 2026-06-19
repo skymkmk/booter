@@ -1,9 +1,9 @@
 use axum::{
+    Json, Router,
     extract::{Path, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, put},
-    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -45,16 +45,22 @@ async fn list_companions(headers: HeaderMap, State(state): State<AppState>) -> i
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
     let rows: Result<Vec<(String, String, String, String)>, _> = sqlx::query_as(
-        "SELECT id, name, scripts, created_at FROM companions ORDER BY created_at DESC"
+        "SELECT id, name, scripts, created_at FROM companions ORDER BY created_at DESC",
     )
     .fetch_all(&state.db)
     .await;
 
     match rows {
         Ok(rows) => {
-            let companions: Vec<Companion> = rows.into_iter().map(|(id, name, scripts, created_at)| Companion {
-                id, name, scripts, created_at
-            }).collect();
+            let companions: Vec<Companion> = rows
+                .into_iter()
+                .map(|(id, name, scripts, created_at)| Companion {
+                    id,
+                    name,
+                    scripts,
+                    created_at,
+                })
+                .collect();
             (StatusCode::OK, Json(companions)).into_response()
         }
         Err(e) => {
@@ -73,23 +79,14 @@ async fn create_companion(
         return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     }
     let id = Uuid::new_v4().to_string();
-    let scripts = if payload.scripts.is_empty() { 
-        "{}".to_string() 
-    } else { 
+    let scripts = if payload.scripts.is_empty() {
+        "{}".to_string()
+    } else {
         match serde_json::to_string(&payload.scripts) {
             Ok(s) => s,
             Err(_) => return (StatusCode::BAD_REQUEST, "Invalid scripts data").into_response(),
         }
     };
-
-    for (k, v) in &payload.scripts {
-        if k.len() > 50 || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return (StatusCode::BAD_REQUEST, format!("Invalid script name: {}", k)).into_response();
-        }
-        if v.len() > 10240 {
-            return (StatusCode::BAD_REQUEST, format!("Script '{}' is too long", k)).into_response();
-        }
-    }
 
     let res = sqlx::query("INSERT INTO companions (id, name, scripts) VALUES (?, ?, ?)")
         .bind(&id)
@@ -129,15 +126,6 @@ async fn update_companion(
         Err(_) => return (StatusCode::BAD_REQUEST, "Invalid scripts data").into_response(),
     };
 
-    for (k, v) in &payload.scripts {
-        if k.len() > 50 || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return (StatusCode::BAD_REQUEST, format!("Invalid script name: {}", k)).into_response();
-        }
-        if v.len() > 10240 {
-            return (StatusCode::BAD_REQUEST, format!("Script '{}' is too long", k)).into_response();
-        }
-    }
-
     let res = sqlx::query("UPDATE companions SET name = ?, scripts = ? WHERE id = ?")
         .bind(&payload.name)
         .bind(&scripts_json)
@@ -149,10 +137,12 @@ async fn update_companion(
         Ok(result) if result.rows_affected() > 0 => {
             // Push update immediately to connected companion
             if let Some(tx) = state.companions.lock().await.get(&id) {
-                let _ = tx.try_send(booter_common::ServerToCompanion::ConfigUpdate { scripts: payload.scripts.clone() });
+                let _ = tx.try_send(booter_common::ServerToCompanion::ConfigUpdate {
+                    scripts: payload.scripts.clone(),
+                });
             }
             (StatusCode::OK, "Updated").into_response()
-        },
+        }
         Ok(_) => (StatusCode::NOT_FOUND, "Companion not found").into_response(),
         Err(e) => {
             tracing::error!("Failed to update companion: {}", e);
@@ -183,7 +173,7 @@ async fn delete_companion(
                 // It's a small edge case, they will reconnect and be rejected next time.
             }
             (StatusCode::OK, "Deleted").into_response()
-        },
+        }
         Ok(_) => (StatusCode::NOT_FOUND, "Companion not found").into_response(),
         Err(e) => {
             tracing::error!("Failed to delete companion: {}", e);

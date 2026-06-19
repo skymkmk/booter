@@ -33,7 +33,7 @@ export function AdminDelayShutdown() {
       <div className="flex flex-col md:flex-row gap-4 items-center">
         <div className="flex-1 w-full">
           <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">
-            调整时间 (分钟，正数为增加，负数为减少)
+            调整时间（分钟，正数为增加，负数为减少）
           </label>
           <input 
             type="number" 

@@ -5,22 +5,28 @@ mod db;
 mod email;
 mod mijia;
 mod mijia_client;
-pub mod wt;
 pub mod quic;
+pub mod wt;
 
+use include_dir::{Dir, include_dir};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use include_dir::{include_dir, Dir};
 
 pub static ASSETS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/../booter-web/dist");
 
 use crate::config::AppConfig;
 use booter_common::{ServerToCompanion, ServerToDashboard};
 use std::collections::HashMap;
-use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+
+pub struct PendingMijiaLogin {
+    pub client: crate::mijia_client::MijiaClient,
+    pub lp_url: String,
+    pub created_at: std::time::Instant,
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -33,6 +39,7 @@ pub struct AppState {
     pub otps: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
     pub node_shutdown_deadline: Arc<Mutex<Option<std::time::Instant>>>,
     pub last_boot_time: Arc<Mutex<Option<std::time::Instant>>>,
+    pub pending_mijia_logins: Arc<Mutex<HashMap<String, PendingMijiaLogin>>>,
 }
 
 #[tokio::main]
@@ -54,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Initializing database at {}...", config.server.database_url);
     let db_pool = db::init_db(&config.server.database_url).await?;
-    
+
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 && args[1] == "reset-admin" {
         tracing::info!("Resetting admin TOTP...");
@@ -63,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         sqlx::query("INSERT INTO system_config (key, value) VALUES ('admin_totp_secret', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
             .bind(&secret_str)
             .execute(&db_pool).await?;
-        
+
         let totp = totp_rs::TOTP::new(
             totp_rs::Algorithm::SHA1,
             6,
@@ -72,7 +79,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             secret.to_bytes().unwrap(),
             Some("Booter".into()),
             "admin@booter".to_string(),
-        ).unwrap();
+        )
+        .unwrap();
         let url = totp.get_url();
         println!("\n=== ADMIN TOTP SETUP ===");
         println!("Scan this URL in your Authenticator app (e.g. Google Authenticator, Authy):");
@@ -92,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         otps: Arc::new(Mutex::new(HashMap::new())),
         node_shutdown_deadline: Arc::new(Mutex::new(None)),
         last_boot_time: Arc::new(Mutex::new(None)),
+        pending_mijia_logins: Arc::new(Mutex::new(HashMap::new())),
     };
 
     let app = api::router(state.clone());

@@ -6,6 +6,7 @@ import { CompanionsPanel } from '../components/CompanionsPanel';
 import { SessionsPanel } from '../components/SessionsPanel';
 import { useAuth } from '../context/AuthContext';
 import { fetchClient } from '../utils/fetchClient';
+import { toast } from 'sonner';
 
 import { QRCodeSVG } from 'qrcode.react';
 
@@ -29,11 +30,12 @@ export default function Admin() {
   const [cooldownMinutes, setCooldownMinutes] = useState<number>(0);
   const [forbiddenTime, setForbiddenTime] = useState<string>('');
   const [savingRestrictions, setSavingRestrictions] = useState(false);
+  const [resettingCooldown, setResettingCooldown] = useState(false);
 
   // Mijia State
   const [mijiaStatus, setMijiaStatus] = useState<'idle' | 'polling' | 'logged_in'>('idle');
   const [qrUrl, setQrUrl] = useState('');
-  const [lpUrl, setLpUrl] = useState('');
+  const [mijiaLoginId, setMijiaLoginId] = useState('');
   const [currentDid, setCurrentDid] = useState<string | null>(null);
   const [devices, setDevices] = useState<any[]>([]);
   const [mijiaLoading, setMijiaLoading] = useState(true);
@@ -136,7 +138,7 @@ export default function Admin() {
       });
       if (data.success) {
         setQrUrl(data.qr_url);
-        setLpUrl(data.lp_url);
+        setMijiaLoginId(data.login_id);
         setMijiaStatus('polling');
       }
     } catch (err) {
@@ -148,7 +150,7 @@ export default function Admin() {
 
   useEffect(() => {
     let pollingTimer: any = null;
-    if (mijiaStatus === 'polling' && lpUrl) {
+    if (mijiaStatus === 'polling' && mijiaLoginId) {
       const poll = async () => {
         try {
           const data = await fetchClient('/api/v1/admin/mijia/qr/poll', {
@@ -157,7 +159,7 @@ export default function Admin() {
               'Content-Type': 'application/json',
               'Authorization': `Bearer ${token}`
             },
-            body: JSON.stringify({ lp_url: lpUrl })
+            body: JSON.stringify({ login_id: mijiaLoginId })
           });
           if (data.success) {
             setMijiaStatus('logged_in');
@@ -171,7 +173,7 @@ export default function Admin() {
       poll();
     }
     return () => clearTimeout(pollingTimer);
-  }, [mijiaStatus, lpUrl, token]);
+  }, [mijiaStatus, mijiaLoginId, token]);
 
   const saveSelectedDevice = async (did: string) => {
     setSavingDid(true);
@@ -262,6 +264,21 @@ export default function Admin() {
       console.error(err);
     } finally {
       setSavingRestrictions(false);
+    }
+  };
+
+  const handleResetBootCooldown = async () => {
+    setResettingCooldown(true);
+    try {
+      await fetchClient('/api/v1/admin/boot-cooldown/reset', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      toast.success('开机冷却已重置，并已同步到控制面板');
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setResettingCooldown(false);
     }
   };
 
@@ -409,13 +426,23 @@ export default function Admin() {
                   <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">留空为不限制。</p>
                 </div>
 
-                <button
-                  type="submit"
-                  disabled={savingRestrictions}
-                  className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium py-3 px-6 rounded-xl transition-colors self-start mt-2"
-                >
-                  {savingRestrictions ? '保存中...' : '保存配置'}
-                </button>
+                <div className="flex flex-col sm:flex-row gap-3 mt-2">
+                  <button
+                    type="submit"
+                    disabled={savingRestrictions}
+                    className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-medium py-3 px-6 rounded-xl transition-colors"
+                  >
+                    {savingRestrictions ? '保存中...' : '保存配置'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleResetBootCooldown}
+                    disabled={resettingCooldown}
+                    className="bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-medium py-3 px-6 rounded-xl transition-colors"
+                  >
+                    {resettingCooldown ? '重置中...' : '重置当前开机冷却'}
+                  </button>
+                </div>
               </form>
             </GlassCard>
 

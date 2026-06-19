@@ -92,6 +92,11 @@ export function useWebTransport(token: string | null, onMessage?: (msg: ServerTo
           }
         }
       }
+
+      setIsConnected(false);
+      reconnectTimeoutRef.current = window.setTimeout(() => {
+        connect();
+      }, 5000);
     } catch (err) {
       console.error("[WebTransport] Error/Disconnected:", err);
       setIsConnected(false);
@@ -101,7 +106,7 @@ export function useWebTransport(token: string | null, onMessage?: (msg: ServerTo
         connect();
       }, 5000);
     }
-  }, []);
+  }, [token, onMessage]);
 
   useEffect(() => {
     connect();

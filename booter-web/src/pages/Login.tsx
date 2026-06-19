@@ -6,10 +6,12 @@ import { GlassCard } from "../components/GlassCard";
 import { useAuth } from "../context/AuthContext";
 import { Turnstile } from "@marsidev/react-turnstile";
 import { fetchClient } from "../utils/fetchClient";
+import { useTheme } from "next-themes";
 
 export default function Login() {
   const navigate = useNavigate();
   const { login } = useAuth();
+  const { resolvedTheme } = useTheme();
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
   const [step, setStep] = useState<0 | 1>(0);
@@ -94,7 +96,7 @@ export default function Login() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-6 relative overflow-hidden bg-slate-50">
+    <div className="min-h-screen flex items-center justify-center p-6 relative overflow-hidden bg-slate-50 dark:bg-slate-900 transition-colors">
       <AmbientBackground color="bg-indigo-400" />
 
       <GlassCard
@@ -104,10 +106,10 @@ export default function Login() {
         className="w-full max-w-md p-10 z-10"
       >
         <div className="text-center mb-10">
-          <h1 className="text-4xl font-bold tracking-tight text-slate-900 mb-2">
+          <h1 className="text-4xl font-bold tracking-tight text-slate-900 dark:text-white mb-2">
             Booter
           </h1>
-          <p className="text-slate-500 text-sm">安全远程控制平面</p>
+          <p className="text-slate-500 dark:text-slate-400 text-sm">安全远程控制平面</p>
         </div>
 
         <div className="space-y-6">
@@ -123,7 +125,7 @@ export default function Login() {
                 className="space-y-6"
               >
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2">
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">
                     邮箱地址
                   </label>
                   <input
@@ -131,7 +133,7 @@ export default function Login() {
                     required
                     value={email}
                     onChange={(e) => setEmail(e.target.value)}
-                    className="w-full bg-white/50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                    className="w-full bg-white/50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
                     placeholder="admin@example.com"
                   />
                 </div>
@@ -145,7 +147,7 @@ export default function Login() {
                     <Turnstile 
                       siteKey={siteKey} 
                       onSuccess={setTurnstileToken} 
-                      options={{ theme: "light" }}
+                      options={{ theme: resolvedTheme === "dark" ? "dark" : "light" }}
                     />
                   </div>
                 )}
@@ -171,7 +173,7 @@ export default function Login() {
                 className="space-y-6"
               >
                 <div>
-                  <label className="block text-sm font-medium text-slate-700 mb-2 flex justify-between items-center">
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2 flex justify-between items-center">
                     <span>验证码</span>
                     <button 
                       type="button" 
@@ -190,7 +192,7 @@ export default function Login() {
                     maxLength={6}
                     value={otp}
                     onChange={(e) => setOtp(e.target.value)}
-                    className="w-full bg-white/50 border border-slate-200 rounded-xl px-4 py-3 text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-center tracking-[0.5em] text-lg font-mono font-medium"
+                    className="w-full bg-white/50 dark:bg-slate-950/50 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all text-center tracking-[0.5em] text-lg font-mono font-medium"
                     placeholder="------"
                   />
                 </div>

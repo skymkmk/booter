@@ -1,15 +1,19 @@
+use crate::AppState;
 use axum::{
-    extract::State,
-    routing::{get, post, delete},
     Json, Router,
-    http::{HeaderMap, Uri, header, StatusCode},
+    extract::State,
+    http::{HeaderMap, StatusCode, Uri, header},
+    middleware::{self, Next},
     response::IntoResponse,
+    routing::{delete, get, post},
 };
+use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
+use rand::{Rng, RngCore};
 use serde::{Deserialize, Serialize};
 use totp_rs::{Algorithm, Secret, TOTP};
-use crate::AppState;
-use rand::{RngCore, Rng};
-use base64::{Engine as _, engine::general_purpose::STANDARD as b64};
+
+const MAX_POLICY_MINUTES: u32 = 7 * 24 * 60;
+const MAX_DELAY_MINUTES: u32 = 7 * 24 * 60;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -17,13 +21,26 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/auth/email/verify", post(verify_email_code))
         .route("/api/v1/auth/admin/totp", post(totp_verify))
         .route("/api/v1/auth/me", get(auth_me))
-        .route("/api/v1/admin/auto-shutdown", get(get_autoshutdown).post(set_autoshutdown))
+        .route(
+            "/api/v1/admin/auto-shutdown",
+            get(get_autoshutdown).post(set_autoshutdown),
+        )
         .route("/api/v1/admin/mijia/status", get(mijia_status))
         .route("/api/v1/admin/mijia/qr/start", get(mijia_qr_start))
         .route("/api/v1/admin/mijia/qr/poll", post(mijia_qr_poll))
         .route("/api/v1/admin/mijia/devices", get(mijia_devices))
-        .route("/api/v1/admin/mijia/devices/select", post(mijia_select_device))
-        .route("/api/v1/admin/boot-restrictions", get(get_boot_restrictions).post(set_boot_restrictions))
+        .route(
+            "/api/v1/admin/mijia/devices/select",
+            post(mijia_select_device),
+        )
+        .route(
+            "/api/v1/admin/boot-restrictions",
+            get(get_boot_restrictions).post(set_boot_restrictions),
+        )
+        .route(
+            "/api/v1/admin/boot-cooldown/reset",
+            post(reset_boot_cooldown),
+        )
         .route("/api/v1/admin/users", get(get_users).post(add_user))
         .route("/api/v1/admin/users/{email}", delete(delete_user))
         .route("/api/v1/admin/sessions", get(get_sessions))
@@ -32,11 +49,45 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/system/start", post(request_startup))
         .route("/api/v1/system/turnstile", get(get_turnstile_config))
         .route("/api/v1/admin/delay", post(admin_delay_shutdown))
-        .nest("/api/v1/admin/companions", crate::api_companions::router(state.clone()))
+        .nest(
+            "/api/v1/admin/companions",
+            crate::api_companions::router(state.clone()),
+        )
         .fallback(static_handler)
+        .layer(middleware::from_fn(add_security_headers))
         .with_state(state)
 }
 
+async fn add_security_headers(
+    request: axum::extract::Request,
+    next: Next,
+) -> axum::response::Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(
+        header::X_FRAME_OPTIONS,
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        header::REFERRER_POLICY,
+        axum::http::HeaderValue::from_static("no-referrer"),
+    );
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(
+            "default-src 'self'; script-src 'self' https://challenges.cloudflare.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self' https:; frame-src https://challenges.cloudflare.com; object-src 'none'; base-uri 'self'; form-action 'self'",
+        ),
+    );
+    headers.insert(
+        axum::http::header::HeaderName::from_static("permissions-policy"),
+        axum::http::HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+    );
+    response
+}
 
 async fn static_handler(uri: Uri) -> impl IntoResponse {
     let mut path = uri.path().trim_start_matches('/');
@@ -59,7 +110,11 @@ async fn static_handler(uri: Uri) -> impl IntoResponse {
     }
 }
 
-pub async fn verify_token_impl(token: &str, expected_role: Option<&str>, db: &sqlx::SqlitePool) -> Option<(String, String)> {
+pub async fn verify_token_impl(
+    token: &str,
+    expected_role: Option<&str>,
+    db: &sqlx::SqlitePool,
+) -> Option<(String, String)> {
     // 1. Fetch valid session (not older than 30 days)
     let record: Option<(String, String)> = sqlx::query_as(
         "SELECT role, email FROM sessions WHERE token = ? AND (julianday('now') - julianday(last_used_at)) <= 30"
@@ -75,13 +130,13 @@ pub async fn verify_token_impl(token: &str, expected_role: Option<&str>, db: &sq
                 return None;
             }
         }
-        
+
         // 2. Slide expiration
         let _ = sqlx::query("UPDATE sessions SET last_used_at = CURRENT_TIMESTAMP WHERE token = ?")
             .bind(token)
             .execute(db)
             .await;
-            
+
         return Some((role, email));
     }
     None
@@ -112,14 +167,18 @@ pub async fn extract_token(headers: &HeaderMap) -> Option<String> {
 
 async fn verify_turnstile(secret: &str, token: &str) -> bool {
     let client = reqwest::Client::new();
-    let res = client.post("https://challenges.cloudflare.com/turnstile/v0/siteverify")
+    let res = client
+        .post("https://challenges.cloudflare.com/turnstile/v0/siteverify")
         .form(&[("secret", secret), ("response", token)])
         .send()
         .await;
 
     if let Ok(res) = res {
         if let Ok(json) = res.json::<serde_json::Value>().await {
-            return json.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+            return json
+                .get("success")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
         }
     }
     false
@@ -158,10 +217,20 @@ async fn totp_verify(
 ) -> Json<AuthResponse> {
     if let Some(ref t_cfg) = state.config.turnstile {
         let Some(ref token) = payload.turnstile_token else {
-            return Json(AuthResponse { success: false, token: None, role: None, message: Some("Missing Turnstile token".into()) });
+            return Json(AuthResponse {
+                success: false,
+                token: None,
+                role: None,
+                message: Some("Missing Turnstile token".into()),
+            });
         };
         if !verify_turnstile(&t_cfg.secret_key, token).await {
-            return Json(AuthResponse { success: false, token: None, role: None, message: Some("Turnstile verification failed".into()) });
+            return Json(AuthResponse {
+                success: false,
+                token: None,
+                role: None,
+                message: Some("Turnstile verification failed".into()),
+            });
         }
     }
 
@@ -170,10 +239,11 @@ async fn totp_verify(
         value: Option<String>,
     }
 
-    let record: Option<AdminRecord> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'admin_totp_secret'")
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
+    let record: Option<AdminRecord> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'admin_totp_secret'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let Some(admin_record) = record else {
         return Json(AuthResponse {
@@ -194,8 +264,16 @@ async fn totp_verify(
     };
 
     // Decode secret
-    let secret = Secret::Encoded(secret_str).to_bytes().unwrap();
-    let totp = TOTP::new(
+    let Ok(secret) = Secret::Encoded(secret_str).to_bytes() else {
+        tracing::error!("Stored admin TOTP secret is invalid");
+        return Json(AuthResponse {
+            success: false,
+            token: None,
+            role: None,
+            message: Some("Admin TOTP configuration is invalid.".into()),
+        });
+    };
+    let Ok(totp) = TOTP::new(
         Algorithm::SHA1,
         6,
         1,
@@ -203,7 +281,15 @@ async fn totp_verify(
         secret,
         Some("Booter".into()),
         "admin".into(),
-    ).unwrap();
+    ) else {
+        tracing::error!("Failed to initialize admin TOTP verifier");
+        return Json(AuthResponse {
+            success: false,
+            token: None,
+            role: None,
+            message: Some("Admin TOTP configuration is invalid.".into()),
+        });
+    };
 
     if totp.check_current(&payload.code).unwrap_or(false) {
         // Generate a random token
@@ -215,12 +301,11 @@ async fn totp_verify(
         };
 
         // Store token in sessions
-        let _ = sqlx::query(
-            "INSERT INTO sessions (token, role, email) VALUES (?, 'admin', 'admin')"
-        )
-        .bind(token_str.clone())
-        .execute(&state.db)
-        .await;
+        let _ =
+            sqlx::query("INSERT INTO sessions (token, role, email) VALUES (?, 'admin', 'admin')")
+                .bind(token_str.clone())
+                .execute(&state.db)
+                .await;
 
         Json(AuthResponse {
             success: true,
@@ -255,28 +340,50 @@ async fn request_email_code(
     State(state): State<AppState>,
     Json(payload): Json<EmailRequest>,
 ) -> Json<AuthResponse> {
-    if let Some(ref t_cfg) = state.config.turnstile {
-        let Some(ref token) = payload.turnstile_token else {
-            return Json(AuthResponse { success: false, token: None, role: None, message: Some("Missing Turnstile token".into()) });
-        };
-        if !verify_turnstile(&t_cfg.secret_key, token).await {
-            return Json(AuthResponse { success: false, token: None, role: None, message: Some("Turnstile verification failed".into()) });
-        }
-    }
-
-    // Validate user is in whitelist
-    let user_exists: Option<(String,)> = sqlx::query_as("SELECT email FROM users WHERE email = ?")
-        .bind(&payload.email)
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
-
-    if user_exists.is_none() {
+    let email = payload.email.trim().to_lowercase();
+    if email.len() > 254 {
         return Json(AuthResponse {
             success: false,
             token: None,
             role: None,
-            message: Some("User not authorized. Contact administrator.".into()),
+            message: Some("Invalid email address".into()),
+        });
+    }
+
+    if let Some(ref t_cfg) = state.config.turnstile {
+        let Some(ref token) = payload.turnstile_token else {
+            return Json(AuthResponse {
+                success: false,
+                token: None,
+                role: None,
+                message: Some("Missing Turnstile token".into()),
+            });
+        };
+        if !verify_turnstile(&t_cfg.secret_key, token).await {
+            return Json(AuthResponse {
+                success: false,
+                token: None,
+                role: None,
+                message: Some("Turnstile verification failed".into()),
+            });
+        }
+    }
+
+    // Validate user is in whitelist
+    let user_exists: Option<(String,)> =
+        sqlx::query_as("SELECT email FROM users WHERE email = ? COLLATE NOCASE")
+            .bind(&email)
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+
+    if user_exists.is_none() {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        return Json(AuthResponse {
+            success: true,
+            token: None,
+            role: None,
+            message: Some("OTP sent".into()),
         });
     }
 
@@ -288,11 +395,17 @@ async fn request_email_code(
     };
 
     let expires_at = std::time::Instant::now() + std::time::Duration::from_secs(300);
-    state.otps.lock().await.insert(payload.email.clone(), (otp_str.clone(), expires_at));
+    state
+        .otps
+        .lock()
+        .await
+        .insert(email.clone(), (otp_str.clone(), expires_at));
 
     // Send email (we do it in the background or block)
     // To block:
-    if let Err(e) = crate::email::send_otp_email(&state.config.smtp, &payload.email, &otp_str).await {
+    if let Err(e) = crate::email::send_otp_email(&state.config.smtp, &email, &otp_str).await
+    {
+        state.otps.lock().await.remove(&email);
         return Json(AuthResponse {
             success: false,
             token: None,
@@ -314,8 +427,9 @@ async fn verify_email_code(
     State(state): State<AppState>,
     Json(payload): Json<EmailVerifyRequest>,
 ) -> Json<AuthResponse> {
+    let email = payload.email.trim().to_lowercase();
     let mut otps = state.otps.lock().await;
-    let valid = if let Some((stored_code, expires_at)) = otps.get(&payload.email) {
+    let valid = if let Some((stored_code, expires_at)) = otps.get(&email) {
         if std::time::Instant::now() > *expires_at {
             false
         } else {
@@ -334,7 +448,7 @@ async fn verify_email_code(
         });
     }
 
-    otps.remove(&payload.email);
+    otps.remove(&email);
 
     // Generate user token
     let token_str = {
@@ -345,15 +459,11 @@ async fn verify_email_code(
     };
 
     // Store token
-    let _ = sqlx::query(
-        "INSERT INTO sessions (token, role, email) VALUES (?, 'user', ?)"
-    )
+    let _ = sqlx::query("INSERT INTO sessions (token, role, email) VALUES (?, 'user', ?)")
     .bind(token_str.clone())
-    .bind(&payload.email)
-    .execute(&state.db)
-    .await;
-
-
+    .bind(&email)
+        .execute(&state.db)
+        .await;
 
     Json(AuthResponse {
         success: true,
@@ -362,7 +472,6 @@ async fn verify_email_code(
         message: None,
     })
 }
-
 
 #[derive(Serialize)]
 pub struct AutoShutdownResponse {
@@ -381,16 +490,23 @@ async fn get_autoshutdown(
     State(state): State<AppState>,
 ) -> Json<AutoShutdownResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(AutoShutdownResponse { success: false, minutes: 0 });
+        return Json(AutoShutdownResponse {
+            success: false,
+            minutes: 0,
+        });
     }
-    
-    let record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'auto_shutdown_minutes'")
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
-        
+
+    let record: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'auto_shutdown_minutes'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+
     let minutes = record.and_then(|(v,)| v.parse::<u32>().ok()).unwrap_or(0);
-    Json(AutoShutdownResponse { success: true, minutes })
+    Json(AutoShutdownResponse {
+        success: true,
+        minutes,
+    })
 }
 
 #[axum::debug_handler]
@@ -400,23 +516,39 @@ async fn set_autoshutdown(
     Json(payload): Json<AutoShutdownRequest>,
 ) -> Json<StartupResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(StartupResponse { success: false, message: "Unauthorized".into() });
+        return Json(StartupResponse {
+            success: false,
+            message: "Unauthorized".into(),
+        });
     }
-    
+    if payload.minutes > MAX_POLICY_MINUTES {
+        return Json(StartupResponse {
+            success: false,
+            message: format!("Auto-shutdown cannot exceed {} minutes", MAX_POLICY_MINUTES),
+        });
+    }
+
     if let Err(e) = sqlx::query(
         "INSERT INTO system_config (key, value) VALUES ('auto_shutdown_minutes', ?) 
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
     )
     .bind(payload.minutes.to_string())
     .execute(&state.db)
-    .await {
-        return Json(StartupResponse { success: false, message: format!("DB Error: {}", e) });
+    .await
+    {
+        return Json(StartupResponse {
+            success: false,
+            message: format!("DB Error: {}", e),
+        });
     }
-    
+
     // Update the deadline immediately and broadcast to clients
     crate::quic::check_and_update_global_deadline(&state, true).await;
-    
-    Json(StartupResponse { success: true, message: "Saved".into() })
+
+    Json(StartupResponse {
+        success: true,
+        message: "Saved".into(),
+    })
 }
 
 #[derive(Serialize)]
@@ -438,22 +570,34 @@ async fn get_boot_restrictions(
     State(state): State<AppState>,
 ) -> Json<BootRestrictionsResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(BootRestrictionsResponse { success: false, cooldown_minutes: 0, forbidden_time: "".into() });
+        return Json(BootRestrictionsResponse {
+            success: false,
+            cooldown_minutes: 0,
+            forbidden_time: "".into(),
+        });
     }
-    
-    let cooldown_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_cooldown_minutes'")
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
-    let cooldown_minutes = cooldown_record.and_then(|(v,)| v.parse::<u32>().ok()).unwrap_or(0);
-    
-    let forbidden_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_forbidden_time'")
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
+
+    let cooldown_record: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_cooldown_minutes'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+    let cooldown_minutes = cooldown_record
+        .and_then(|(v,)| v.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let forbidden_record: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_forbidden_time'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
     let forbidden_time = forbidden_record.map(|(v,)| v).unwrap_or_else(|| "".into());
-        
-    Json(BootRestrictionsResponse { success: true, cooldown_minutes, forbidden_time })
+
+    Json(BootRestrictionsResponse {
+        success: true,
+        cooldown_minutes,
+        forbidden_time,
+    })
 }
 
 #[axum::debug_handler]
@@ -463,22 +607,76 @@ async fn set_boot_restrictions(
     Json(payload): Json<BootRestrictionsRequest>,
 ) -> Json<StartupResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(StartupResponse { success: false, message: "Unauthorized".into() });
+        return Json(StartupResponse {
+            success: false,
+            message: "Unauthorized".into(),
+        });
     }
-    
+    if payload.cooldown_minutes > MAX_POLICY_MINUTES {
+        return Json(StartupResponse {
+            success: false,
+            message: format!("Cooldown cannot exceed {} minutes", MAX_POLICY_MINUTES),
+        });
+    }
+    if !payload.forbidden_time.trim().is_empty()
+        && parse_forbidden_time(&payload.forbidden_time).is_none()
+    {
+        return Json(StartupResponse {
+            success: false,
+            message: "Forbidden time must use HH:MM-HH:MM".into(),
+        });
+    }
+
     let _ = sqlx::query("INSERT INTO system_config (key, value) VALUES ('boot_cooldown_minutes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
         .bind(payload.cooldown_minutes.to_string())
         .execute(&state.db)
         .await;
-        
+
     let _ = sqlx::query("INSERT INTO system_config (key, value) VALUES ('boot_forbidden_time', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
         .bind(payload.forbidden_time)
         .execute(&state.db)
         .await;
-    
+
     crate::quic::broadcast_node_status(&state).await;
 
-    Json(StartupResponse { success: true, message: "Saved".into() })
+    Json(StartupResponse {
+        success: true,
+        message: "Saved".into(),
+    })
+}
+
+fn parse_forbidden_time(value: &str) -> Option<(time::Time, time::Time)> {
+    let (start_str, end_str) = value.split_once('-')?;
+    let parse_time = |input: &str| -> Option<time::Time> {
+        let mut parts = input.trim().split(':');
+        let hour: u8 = parts.next()?.parse().ok()?;
+        let minute: u8 = parts.next()?.parse().ok()?;
+        if parts.next().is_some() {
+            return None;
+        }
+        time::Time::from_hms(hour, minute, 0).ok()
+    };
+    Some((parse_time(start_str)?, parse_time(end_str)?))
+}
+
+#[axum::debug_handler]
+async fn reset_boot_cooldown(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Json<StartupResponse> {
+    if !verify_admin(&headers, &state.db).await {
+        return Json(StartupResponse {
+            success: false,
+            message: "Unauthorized".into(),
+        });
+    }
+
+    *state.last_boot_time.lock().await = None;
+    crate::quic::broadcast_node_status(&state).await;
+    Json(StartupResponse {
+        success: true,
+        message: "Boot cooldown reset".into(),
+    })
 }
 
 #[derive(Serialize)]
@@ -494,108 +692,184 @@ async fn request_startup(
 ) -> (axum::http::StatusCode, Json<StartupResponse>) {
     let token = match extract_token(&headers).await {
         Some(t) => t,
-        None => return (axum::http::StatusCode::UNAUTHORIZED, Json(StartupResponse { success: false, message: "Missing or invalid Authorization header".into() })),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(StartupResponse {
+                    success: false,
+                    message: "Missing or invalid Authorization header".into(),
+                }),
+            );
+        }
     };
-    
+
     let (role, email) = match verify_token_impl(&token, None, &state.db).await {
         Some(r) => r,
-        None => return (axum::http::StatusCode::UNAUTHORIZED, Json(StartupResponse { success: false, message: "Invalid or expired token".into() })),
+        None => {
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(StartupResponse {
+                    success: false,
+                    message: "Invalid or expired token".into(),
+                }),
+            );
+        }
     };
-    
+
     let is_admin = role == "admin";
     if !is_admin {
         // Cooldown check
-        let cooldown_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_cooldown_minutes'")
-            .fetch_optional(&state.db).await.unwrap_or(None);
-        let cooldown_minutes = cooldown_record.and_then(|(v,)| v.parse::<u32>().ok()).unwrap_or(0);
-        
+        let cooldown_record: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_cooldown_minutes'")
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None);
+        let cooldown_minutes = cooldown_record
+            .and_then(|(v,)| v.parse::<u32>().ok())
+            .unwrap_or(0);
+
         if cooldown_minutes > 0 {
             if let Some(last_time) = *state.last_boot_time.lock().await {
                 let elapsed_mins = last_time.elapsed().as_secs_f64() / 60.0;
                 if elapsed_mins < cooldown_minutes as f64 {
-                    return (axum::http::StatusCode::FORBIDDEN, Json(StartupResponse { success: false, message: "距离上次开机时间过短，请稍后再试".into() }));
+                    return (
+                        axum::http::StatusCode::FORBIDDEN,
+                        Json(StartupResponse {
+                            success: false,
+                            message: "距离上次开机时间过短，请稍后再试".into(),
+                        }),
+                    );
                 }
             }
         }
-        
+
         // Forbidden time check
-        let forbidden_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_forbidden_time'")
-            .fetch_optional(&state.db).await.unwrap_or(None);
+        let forbidden_record: Option<(String,)> =
+            sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_forbidden_time'")
+                .fetch_optional(&state.db)
+                .await
+                .unwrap_or(None);
         if let Some((forbidden_str,)) = forbidden_record {
             if !forbidden_str.trim().is_empty() {
                 if let Some((start_str, end_str)) = forbidden_str.split_once('-') {
-                    let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc()).time();
+                    let now = time::OffsetDateTime::now_local()
+                        .unwrap_or_else(|_| time::OffsetDateTime::now_utc())
+                        .time();
                     let parse_time = |s: &str| -> Option<time::Time> {
                         let mut parts = s.trim().split(':');
                         let h: u8 = parts.next()?.parse().ok()?;
                         let m: u8 = parts.next()?.parse().ok()?;
                         time::Time::from_hms(h, m, 0).ok()
                     };
-                    
-                    if let (Some(start), Some(end)) = (
-                        parse_time(start_str),
-                        parse_time(end_str)
-                    ) {
+
+                    if let (Some(start), Some(end)) = (parse_time(start_str), parse_time(end_str)) {
                         let is_forbidden = if start <= end {
                             now >= start && now <= end
                         } else {
                             now >= start || now <= end
                         };
-                        
+
                         if is_forbidden {
-                            return (axum::http::StatusCode::FORBIDDEN, Json(StartupResponse { success: false, message: "当前处于禁止开机时段".into() }));
+                            return (
+                                axum::http::StatusCode::FORBIDDEN,
+                                Json(StartupResponse {
+                                    success: false,
+                                    message: "当前处于禁止开机时段".into(),
+                                }),
+                            );
                         }
                     }
                 }
             }
         }
     }
-    
-    let auth_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_auth'")
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
-        
-    let did_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_did'")
-        .fetch_optional(&state.db)
-        .await
-        .unwrap_or(None);
+
+    let auth_record: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_auth'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+
+    let did_record: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_did'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
 
     let Some((auth_json,)) = auth_record else {
-        return (axum::http::StatusCode::BAD_REQUEST, Json(StartupResponse { success: false, message: "Mijia auth not configured in system_config".into() }));
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(StartupResponse {
+                success: false,
+                message: "Mijia auth not configured in system_config".into(),
+            }),
+        );
     };
-    
+
     let Some((did,)) = did_record else {
-        return (axum::http::StatusCode::BAD_REQUEST, Json(StartupResponse { success: false, message: "Mijia DID not configured in system_config".into() }));
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(StartupResponse {
+                success: false,
+                message: "Mijia DID not configured in system_config".into(),
+            }),
+        );
     };
 
     let auth_data: crate::mijia_client::MijiaAuthData = match serde_json::from_str(&auth_json) {
         Ok(data) => data,
-        Err(_) => return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(StartupResponse { success: false, message: "Invalid Mijia auth format in DB".into() })),
+        Err(_) => {
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                Json(StartupResponse {
+                    success: false,
+                    message: "Invalid Mijia auth format in DB".into(),
+                }),
+            );
+        }
     };
 
     let mut client = crate::mijia_client::MijiaClient::new(
         "booter_backend_client".into(),
         "booter_backend_pass".into(),
-        "Booter/1.0".into()
+        "Booter/1.0".into(),
     );
     client.set_auth_data(auth_data);
 
-    match client.set_devices_prop(&did, 2, 1, serde_json::json!(true)).await {
+    let action_result = client
+        .set_devices_prop(&did, 2, 1, serde_json::json!(true))
+        .await;
+    if let Err(error) = persist_mijia_auth_if_updated(&state, &client).await {
+        tracing::error!("Failed to persist refreshed Mijia credentials: {}", error);
+    }
+
+    match action_result {
         Ok(_) => {
             *state.last_boot_time.lock().await = Some(std::time::Instant::now());
-            
+
             if !is_admin {
                 let _ = sqlx::query("INSERT INTO user_logs (email, action) VALUES (?, 'Wakeup')")
                     .bind(&email)
                     .execute(&state.db)
                     .await;
             }
-            
+
             crate::quic::broadcast_node_status(&state).await;
-            (axum::http::StatusCode::OK, Json(StartupResponse { success: true, message: "Smart plug turned on successfully".into() }))
-        },
-        Err(e) => (axum::http::StatusCode::INTERNAL_SERVER_ERROR, Json(StartupResponse { success: false, message: format!("Failed to trigger smart plug: {}", e) }))
+            (
+                axum::http::StatusCode::OK,
+                Json(StartupResponse {
+                    success: true,
+                    message: "Smart plug turned on successfully".into(),
+                }),
+            )
+        }
+        Err(e) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(StartupResponse {
+                success: false,
+                message: format!("Failed to trigger smart plug: {}", e),
+            }),
+        ),
     }
 }
 
@@ -614,14 +888,17 @@ pub struct AddUserRequest {
 #[axum::debug_handler]
 async fn get_users(headers: HeaderMap, State(state): State<AppState>) -> Json<UserListResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(UserListResponse { success: false, users: vec![] });
+        return Json(UserListResponse {
+            success: false,
+            users: vec![],
+        });
     }
-    
+
     let records: Vec<(String,)> = sqlx::query_as("SELECT email FROM users")
         .fetch_all(&state.db)
         .await
         .unwrap_or_default();
-        
+
     Json(UserListResponse {
         success: true,
         users: records.into_iter().map(|(e,)| e).collect(),
@@ -635,16 +912,32 @@ async fn add_user(
     Json(payload): Json<AddUserRequest>,
 ) -> Json<StartupResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(StartupResponse { success: false, message: "Unauthorized".into() });
+        return Json(StartupResponse {
+            success: false,
+            message: "Unauthorized".into(),
+        });
     }
-    
+    let email = payload.email.trim().to_lowercase();
+    if email.len() > 254 || email.parse::<lettre::Address>().is_err() {
+        return Json(StartupResponse {
+            success: false,
+            message: "Invalid email address".into(),
+        });
+    }
+
     match sqlx::query("INSERT INTO users (email) VALUES (?)")
-        .bind(&payload.email)
+        .bind(&email)
         .execute(&state.db)
-        .await 
+        .await
     {
-        Ok(_) => Json(StartupResponse { success: true, message: "User added".into() }),
-        Err(_) => Json(StartupResponse { success: false, message: "Failed to add user".into() }),
+        Ok(_) => Json(StartupResponse {
+            success: true,
+            message: "User added".into(),
+        }),
+        Err(_) => Json(StartupResponse {
+            success: false,
+            message: "Failed to add user".into(),
+        }),
     }
 }
 
@@ -655,15 +948,21 @@ async fn delete_user(
     State(state): State<AppState>,
 ) -> Json<StartupResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(StartupResponse { success: false, message: "Unauthorized".into() });
+        return Json(StartupResponse {
+            success: false,
+            message: "Unauthorized".into(),
+        });
     }
-    
+
     let _ = sqlx::query("DELETE FROM users WHERE email = ?")
         .bind(&email)
         .execute(&state.db)
         .await;
-        
-    Json(StartupResponse { success: true, message: "User deleted".into() })
+
+    Json(StartupResponse {
+        success: true,
+        message: "User deleted".into(),
+    })
 }
 
 // Mijia Management APIs
@@ -678,12 +977,13 @@ pub struct MijiaStatusResponse {
 pub struct MijiaQrStartResponse {
     pub success: bool,
     pub qr_url: String,
-    pub lp_url: String,
+    pub login_id: String,
+    pub message: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub struct MijiaQrPollRequest {
-    pub lp_url: String,
+    pub login_id: String,
 }
 
 #[derive(Serialize)]
@@ -698,76 +998,219 @@ pub struct MijiaSelectDeviceRequest {
 }
 
 #[axum::debug_handler]
-async fn mijia_status(headers: HeaderMap, State(state): State<AppState>) -> Json<MijiaStatusResponse> {
+async fn mijia_status(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Json<MijiaStatusResponse> {
     if !verify_admin(&headers, &state.db).await {
-         return Json(MijiaStatusResponse { success: false, is_logged_in: false, current_did: None });
+        return Json(MijiaStatusResponse {
+            success: false,
+            is_logged_in: false,
+            current_did: None,
+        });
     }
-    
-    let auth_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_auth'").fetch_optional(&state.db).await.unwrap_or(None);
-    let did_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_did'").fetch_optional(&state.db).await.unwrap_or(None);
-    
+
+    let auth_record: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_auth'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+    let did_record: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_did'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
+
+    let is_logged_in = auth_record
+        .as_ref()
+        .and_then(|(json,)| serde_json::from_str::<crate::mijia_client::MijiaAuthData>(json).ok())
+        .is_some_and(|auth| {
+            !auth.service_token.is_empty()
+                && !auth.ssecurity.is_empty()
+                && auth.pass_token.is_some_and(|token| !token.is_empty())
+        });
+
     Json(MijiaStatusResponse {
         success: true,
-        is_logged_in: auth_record.is_some(),
+        is_logged_in,
         current_did: did_record.map(|r| r.0),
     })
 }
 
 #[axum::debug_handler]
-async fn mijia_qr_start(headers: HeaderMap, State(state): State<AppState>) -> Json<MijiaQrStartResponse> {
+async fn mijia_qr_start(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Json<MijiaQrStartResponse> {
     if !verify_admin(&headers, &state.db).await {
-         return Json(MijiaQrStartResponse { success: false, qr_url: "".into(), lp_url: "".into() });
+        return Json(MijiaQrStartResponse {
+            success: false,
+            qr_url: "".into(),
+            login_id: "".into(),
+            message: Some("Unauthorized".into()),
+        });
     }
-    let client = crate::mijia_client::MijiaClient::new("booter_backend_client".into(), "booter_backend_pass".into(), "Booter/1.0".into());
+    let client = crate::mijia_client::MijiaClient::new_random();
     match client.qr_login_step1().await {
-        Ok((qr_url, lp_url)) => Json(MijiaQrStartResponse { success: true, qr_url, lp_url }),
-        Err(_) => Json(MijiaQrStartResponse { success: false, qr_url: "".into(), lp_url: "".into() }),
-    }
-}
-
-#[axum::debug_handler]
-async fn mijia_qr_poll(headers: HeaderMap, State(state): State<AppState>, Json(payload): Json<MijiaQrPollRequest>) -> Json<StartupResponse> {
-    if !verify_admin(&headers, &state.db).await {
-         return Json(StartupResponse { success: false, message: "".into() });
-    }
-    let mut client = crate::mijia_client::MijiaClient::new("booter_backend_client".into(), "booter_backend_pass".into(), "Booter/1.0".into());
-    match client.qr_login_step2(&payload.lp_url).await {
-        Ok(auth_data) => {
-            let auth_str = serde_json::to_string(&auth_data).unwrap_or_default();
-            let _ = sqlx::query("INSERT INTO system_config (key, value) VALUES ('mijia_auth', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(auth_str).execute(&state.db).await;
-            Json(StartupResponse { success: true, message: "Logged in".into() })
+        Ok((qr_url, lp_url)) => {
+            let login_id = uuid::Uuid::new_v4().to_string();
+            let mut pending = state.pending_mijia_logins.lock().await;
+            pending.retain(|_, login| {
+                login.created_at.elapsed() < std::time::Duration::from_secs(300)
+            });
+            pending.insert(
+                login_id.clone(),
+                crate::PendingMijiaLogin {
+                    client,
+                    lp_url,
+                    created_at: std::time::Instant::now(),
+                },
+            );
+            Json(MijiaQrStartResponse {
+                success: true,
+                qr_url,
+                login_id,
+                message: None,
+            })
         }
-        Err(e) => Json(StartupResponse { success: false, message: e }),
+        Err(error) => Json(MijiaQrStartResponse {
+            success: false,
+            qr_url: "".into(),
+            login_id: "".into(),
+            message: Some(error),
+        }),
     }
 }
 
 #[axum::debug_handler]
-async fn mijia_devices(headers: HeaderMap, State(state): State<AppState>) -> Json<MijiaDevicesResponse> {
+async fn mijia_qr_poll(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<MijiaQrPollRequest>,
+) -> Json<StartupResponse> {
     if !verify_admin(&headers, &state.db).await {
-         return Json(MijiaDevicesResponse { success: false, devices: vec![] });
+        return Json(StartupResponse {
+            success: false,
+            message: "".into(),
+        });
     }
-    let auth_record: Option<(String,)> = sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_auth'").fetch_optional(&state.db).await.unwrap_or(None);
+    let Some(mut pending_login) = state
+        .pending_mijia_logins
+        .lock()
+        .await
+        .remove(&payload.login_id)
+    else {
+        return Json(StartupResponse {
+            success: false,
+            message: "Login session expired; generate a new QR code".into(),
+        });
+    };
+    if pending_login.created_at.elapsed() >= std::time::Duration::from_secs(300) {
+        return Json(StartupResponse {
+            success: false,
+            message: "Login session expired; generate a new QR code".into(),
+        });
+    }
+
+    match pending_login
+        .client
+        .qr_login_step2(&pending_login.lp_url)
+        .await
+    {
+        Ok(auth_data) => match persist_mijia_auth(&state, &auth_data).await {
+            Ok(()) => Json(StartupResponse {
+                success: true,
+                message: "Logged in".into(),
+            }),
+            Err(error) => Json(StartupResponse {
+                success: false,
+                message: error,
+            }),
+        },
+        Err(error) => {
+            if pending_login.created_at.elapsed() < std::time::Duration::from_secs(300) {
+                state
+                    .pending_mijia_logins
+                    .lock()
+                    .await
+                    .insert(payload.login_id, pending_login);
+            }
+            Json(StartupResponse {
+                success: false,
+                message: error,
+            })
+        }
+    }
+}
+
+#[axum::debug_handler]
+async fn mijia_devices(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> Json<MijiaDevicesResponse> {
+    if !verify_admin(&headers, &state.db).await {
+        return Json(MijiaDevicesResponse {
+            success: false,
+            devices: vec![],
+        });
+    }
+    let auth_record: Option<(String,)> =
+        sqlx::query_as("SELECT value FROM system_config WHERE key = 'mijia_auth'")
+            .fetch_optional(&state.db)
+            .await
+            .unwrap_or(None);
     if let Some((auth_json,)) = auth_record {
-        if let Ok(auth_data) = serde_json::from_str::<crate::mijia_client::MijiaAuthData>(&auth_json) {
-            let mut client = crate::mijia_client::MijiaClient::new("booter_backend_client".into(), "booter_backend_pass".into(), "Booter/1.0".into());
+        if let Ok(auth_data) =
+            serde_json::from_str::<crate::mijia_client::MijiaAuthData>(&auth_json)
+        {
+            let mut client = crate::mijia_client::MijiaClient::new(
+                "booter_backend_client".into(),
+                "booter_backend_pass".into(),
+                "Booter/1.0".into(),
+            );
             client.set_auth_data(auth_data);
-            if let Ok(res) = client.request("/home/device_list", &serde_json::json!({"getVirtualModel": false, "getHuamiDevices": 1})).await {
+            let result = client
+                .request(
+                    "/home/device_list",
+                    &serde_json::json!({"getVirtualModel": false, "getHuamiDevices": 1}),
+                )
+                .await;
+            if let Err(error) = persist_mijia_auth_if_updated(&state, &client).await {
+                tracing::error!("Failed to persist refreshed Mijia credentials: {}", error);
+            }
+            if let Ok(res) = result {
                 if let Some(list) = res.get("list").and_then(|l| l.as_array()) {
-                    return Json(MijiaDevicesResponse { success: true, devices: list.clone() });
+                    return Json(MijiaDevicesResponse {
+                        success: true,
+                        devices: list.clone(),
+                    });
                 }
             }
         }
     }
-    Json(MijiaDevicesResponse { success: false, devices: vec![] })
+    Json(MijiaDevicesResponse {
+        success: false,
+        devices: vec![],
+    })
 }
 
 #[axum::debug_handler]
-async fn mijia_select_device(headers: HeaderMap, State(state): State<AppState>, Json(payload): Json<MijiaSelectDeviceRequest>) -> Json<StartupResponse> {
+async fn mijia_select_device(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<MijiaSelectDeviceRequest>,
+) -> Json<StartupResponse> {
     if !verify_admin(&headers, &state.db).await {
-         return Json(StartupResponse { success: false, message: "".into() });
+        return Json(StartupResponse {
+            success: false,
+            message: "".into(),
+        });
     }
     let _ = sqlx::query("INSERT INTO system_config (key, value) VALUES ('mijia_did', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(&payload.did).execute(&state.db).await;
-    Json(StartupResponse { success: true, message: "Saved".into() })
+    Json(StartupResponse {
+        success: true,
+        message: "Saved".into(),
+    })
 }
 
 #[derive(Deserialize)]
@@ -776,29 +1219,75 @@ pub struct DelayShutdownRequest {
 }
 
 #[axum::debug_handler]
-async fn admin_delay_shutdown(headers: HeaderMap, State(state): State<AppState>, Json(payload): Json<DelayShutdownRequest>) -> Json<StartupResponse> {
+async fn admin_delay_shutdown(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+    Json(payload): Json<DelayShutdownRequest>,
+) -> Json<StartupResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(StartupResponse { success: false, message: "Unauthorized".into() });
+        return Json(StartupResponse {
+            success: false,
+            message: "Unauthorized".into(),
+        });
     }
-    
+    if payload.minutes.unsigned_abs() > MAX_DELAY_MINUTES {
+        return Json(StartupResponse {
+            success: false,
+            message: format!(
+                "Adjustment must be between -{} and {} minutes",
+                MAX_DELAY_MINUTES, MAX_DELAY_MINUTES
+            ),
+        });
+    }
+
     let mut current_deadline = state.node_shutdown_deadline.lock().await;
-    let base_time = current_deadline.unwrap_or_else(|| std::time::Instant::now());
-    
+    let now = std::time::Instant::now();
+    let base_time = current_deadline.unwrap_or(now);
+    let adjustment =
+        std::time::Duration::from_secs(payload.minutes.unsigned_abs() as u64 * 60);
     let new_deadline = if payload.minutes >= 0 {
-        base_time + std::time::Duration::from_secs(payload.minutes as u64 * 60)
+        base_time + adjustment
     } else {
-        let sub = std::time::Duration::from_secs(payload.minutes.abs() as u64 * 60);
-        if let Some(t) = base_time.checked_sub(sub) { t } else { std::time::Instant::now() }
+        base_time.checked_sub(adjustment).unwrap_or(now).max(now)
     };
-    
-    // Ensure deadline isn't past
-    if new_deadline < std::time::Instant::now() {
-        *current_deadline = Some(std::time::Instant::now()); // shutdown soon
-    } else {
-        *current_deadline = Some(new_deadline);
+    *current_deadline = Some(new_deadline);
+    drop(current_deadline);
+
+    crate::quic::broadcast_node_status(&state).await;
+    Json(StartupResponse {
+        success: true,
+        message: format!("Shutdown adjusted by {} minutes", payload.minutes),
+    })
+}
+
+async fn persist_mijia_auth(
+    state: &AppState,
+    auth_data: &crate::mijia_client::MijiaAuthData,
+) -> Result<(), String> {
+    let auth_json = serde_json::to_string(auth_data)
+        .map_err(|error| format!("Failed to serialize Mijia credentials: {}", error))?;
+    sqlx::query(
+        "INSERT INTO system_config (key, value) VALUES ('mijia_auth', ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+    )
+    .bind(auth_json)
+    .execute(&state.db)
+    .await
+    .map_err(|error| format!("Failed to persist Mijia credentials: {}", error))?;
+    Ok(())
+}
+
+async fn persist_mijia_auth_if_updated(
+    state: &AppState,
+    client: &crate::mijia_client::MijiaClient,
+) -> Result<(), String> {
+    if client.auth_was_updated() {
+        let auth_data = client
+            .current_auth_data()
+            .ok_or("Mijia credentials disappeared")?;
+        persist_mijia_auth(state, auth_data).await?;
     }
-    
-    Json(StartupResponse { success: true, message: format!("Delay adjusted by {} minutes", payload.minutes) })
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -808,10 +1297,16 @@ pub struct AuthMeResponse {
 }
 
 #[axum::debug_handler]
-async fn auth_me(headers: HeaderMap, State(state): State<AppState>) -> (axum::http::StatusCode, Json<Option<AuthMeResponse>>) {
+async fn auth_me(
+    headers: HeaderMap,
+    State(state): State<AppState>,
+) -> (axum::http::StatusCode, Json<Option<AuthMeResponse>>) {
     if let Some(token) = extract_token(&headers).await {
         if let Some((role, email)) = verify_token_impl(&token, None, &state.db).await {
-            return (axum::http::StatusCode::OK, Json(Some(AuthMeResponse { email, role })));
+            return (
+                axum::http::StatusCode::OK,
+                Json(Some(AuthMeResponse { email, role })),
+            );
         }
     }
     (axum::http::StatusCode::UNAUTHORIZED, Json(None))
@@ -835,30 +1330,56 @@ pub struct SessionsResponse {
 #[axum::debug_handler]
 async fn get_sessions(headers: HeaderMap, State(state): State<AppState>) -> Json<SessionsResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(SessionsResponse { success: false, sessions: vec![] });
+        return Json(SessionsResponse {
+            success: false,
+            sessions: vec![],
+        });
     }
-    
+
     let records: Vec<(String, String, String, String, String)> = sqlx::query_as(
         "SELECT token, role, email, datetime(created_at, 'localtime'), datetime(last_used_at, 'localtime') FROM sessions ORDER BY last_used_at DESC"
     )
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
-    
-    let sessions = records.into_iter().map(|r| SessionItem {
-        token: r.0, role: r.1, email: r.2, created_at: r.3, last_used_at: r.4
-    }).collect();
-    
-    Json(SessionsResponse { success: true, sessions })
+
+    let sessions = records
+        .into_iter()
+        .map(|r| SessionItem {
+            token: r.0,
+            role: r.1,
+            email: r.2,
+            created_at: r.3,
+            last_used_at: r.4,
+        })
+        .collect();
+
+    Json(SessionsResponse {
+        success: true,
+        sessions,
+    })
 }
 
 #[axum::debug_handler]
-async fn delete_session(headers: HeaderMap, axum::extract::Path(token): axum::extract::Path<String>, State(state): State<AppState>) -> Json<StartupResponse> {
+async fn delete_session(
+    headers: HeaderMap,
+    axum::extract::Path(token): axum::extract::Path<String>,
+    State(state): State<AppState>,
+) -> Json<StartupResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(StartupResponse { success: false, message: "Unauthorized".into() });
+        return Json(StartupResponse {
+            success: false,
+            message: "Unauthorized".into(),
+        });
     }
-    let _ = sqlx::query("DELETE FROM sessions WHERE token = ?").bind(&token).execute(&state.db).await;
-    Json(StartupResponse { success: true, message: "Session deleted".into() })
+    let _ = sqlx::query("DELETE FROM sessions WHERE token = ?")
+        .bind(&token)
+        .execute(&state.db)
+        .await;
+    Json(StartupResponse {
+        success: true,
+        message: "Session deleted".into(),
+    })
 }
 
 #[derive(Serialize)]
@@ -881,17 +1402,27 @@ pub struct LogsQuery {
 }
 
 #[axum::debug_handler]
-async fn get_logs(headers: HeaderMap, axum::extract::Query(query): axum::extract::Query<LogsQuery>, State(state): State<AppState>) -> Json<LogsResponse> {
+async fn get_logs(
+    headers: HeaderMap,
+    axum::extract::Query(query): axum::extract::Query<LogsQuery>,
+    State(state): State<AppState>,
+) -> Json<LogsResponse> {
     if !verify_admin(&headers, &state.db).await {
-        return Json(LogsResponse { success: false, logs: vec![] });
+        return Json(LogsResponse {
+            success: false,
+            logs: vec![],
+        });
     }
-    
+
     let page = query.page.unwrap_or(1).max(1);
     let offset = (page - 1) * 10;
-    
+
     // Auto-delete older than 90 days
-    let _ = sqlx::query("DELETE FROM user_logs WHERE (julianday('now') - julianday(created_at)) > 90").execute(&state.db).await;
-    
+    let _ =
+        sqlx::query("DELETE FROM user_logs WHERE (julianday('now') - julianday(created_at)) > 90")
+            .execute(&state.db)
+            .await;
+
     let records: Vec<(i64, String, String, String)> = sqlx::query_as(
         "SELECT id, email, action, datetime(created_at, 'localtime') FROM user_logs ORDER BY id DESC LIMIT 10 OFFSET ?"
     )
@@ -899,10 +1430,32 @@ async fn get_logs(headers: HeaderMap, axum::extract::Query(query): axum::extract
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
-    
-    let logs = records.into_iter().map(|r| LogItem {
-        id: r.0, email: r.1, action: r.2, created_at: r.3
-    }).collect();
-    
-    Json(LogsResponse { success: true, logs })
+
+    let logs = records
+        .into_iter()
+        .map(|r| LogItem {
+            id: r.0,
+            email: r.1,
+            action: r.2,
+            created_at: r.3,
+        })
+        .collect();
+
+    Json(LogsResponse {
+        success: true,
+        logs,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_forbidden_time;
+
+    #[test]
+    fn forbidden_time_requires_valid_hour_and_minute() {
+        assert!(parse_forbidden_time("23:00-08:00").is_some());
+        assert!(parse_forbidden_time("24:00-08:00").is_none());
+        assert!(parse_forbidden_time("08:00").is_none());
+        assert!(parse_forbidden_time("08:00-09:00-extra").is_none());
+    }
 }
