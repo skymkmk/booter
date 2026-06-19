@@ -555,12 +555,14 @@ async fn set_autoshutdown(
 pub struct BootRestrictionsResponse {
     pub success: bool,
     pub cooldown_minutes: u32,
+    pub absolute_cooldown_minutes: u32,
     pub forbidden_time: String,
 }
 
 #[derive(Deserialize)]
 pub struct BootRestrictionsRequest {
     pub cooldown_minutes: u32,
+    pub absolute_cooldown_minutes: u32,
     pub forbidden_time: String,
 }
 
@@ -573,6 +575,7 @@ async fn get_boot_restrictions(
         return Json(BootRestrictionsResponse {
             success: false,
             cooldown_minutes: 0,
+            absolute_cooldown_minutes: 0,
             forbidden_time: "".into(),
         });
     }
@@ -586,6 +589,16 @@ async fn get_boot_restrictions(
         .and_then(|(v,)| v.parse::<u32>().ok())
         .unwrap_or(0);
 
+    let absolute_cooldown_record: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM system_config WHERE key = 'absolute_boot_cooldown_minutes'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    let absolute_cooldown_minutes = absolute_cooldown_record
+        .and_then(|(v,)| v.parse::<u32>().ok())
+        .unwrap_or(0);
+
     let forbidden_record: Option<(String,)> =
         sqlx::query_as("SELECT value FROM system_config WHERE key = 'boot_forbidden_time'")
             .fetch_optional(&state.db)
@@ -596,6 +609,7 @@ async fn get_boot_restrictions(
     Json(BootRestrictionsResponse {
         success: true,
         cooldown_minutes,
+        absolute_cooldown_minutes,
         forbidden_time,
     })
 }
@@ -618,6 +632,15 @@ async fn set_boot_restrictions(
             message: format!("Cooldown cannot exceed {} minutes", MAX_POLICY_MINUTES),
         });
     }
+    if payload.absolute_cooldown_minutes > MAX_POLICY_MINUTES {
+        return Json(StartupResponse {
+            success: false,
+            message: format!(
+                "Absolute cooldown cannot exceed {} minutes",
+                MAX_POLICY_MINUTES
+            ),
+        });
+    }
     if !payload.forbidden_time.trim().is_empty()
         && parse_forbidden_time(&payload.forbidden_time).is_none()
     {
@@ -629,6 +652,11 @@ async fn set_boot_restrictions(
 
     let _ = sqlx::query("INSERT INTO system_config (key, value) VALUES ('boot_cooldown_minutes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
         .bind(payload.cooldown_minutes.to_string())
+        .execute(&state.db)
+        .await;
+
+    let _ = sqlx::query("INSERT INTO system_config (key, value) VALUES ('absolute_boot_cooldown_minutes', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+        .bind(payload.absolute_cooldown_minutes.to_string())
         .execute(&state.db)
         .await;
 
@@ -672,6 +700,7 @@ async fn reset_boot_cooldown(
     }
 
     *state.last_boot_time.lock().await = None;
+    *state.last_offline_time.lock().await = None;
     crate::quic::broadcast_node_status(&state).await;
     Json(StartupResponse {
         success: true,
@@ -737,6 +766,31 @@ async fn request_startup(
                         Json(StartupResponse {
                             success: false,
                             message: "距离上次开机时间过短，请稍后再试".into(),
+                        }),
+                    );
+                }
+            }
+        }
+
+        let absolute_cooldown_record: Option<(String,)> = sqlx::query_as(
+            "SELECT value FROM system_config WHERE key = 'absolute_boot_cooldown_minutes'",
+        )
+        .fetch_optional(&state.db)
+        .await
+        .unwrap_or(None);
+        let absolute_cooldown_minutes = absolute_cooldown_record
+            .and_then(|(v,)| v.parse::<u32>().ok())
+            .unwrap_or(0);
+
+        if absolute_cooldown_minutes > 0 {
+            if let Some(last_time) = *state.last_offline_time.lock().await {
+                let elapsed_mins = last_time.elapsed().as_secs_f64() / 60.0;
+                if elapsed_mins < absolute_cooldown_minutes as f64 {
+                    return (
+                        axum::http::StatusCode::FORBIDDEN,
+                        Json(StartupResponse {
+                            success: false,
+                            message: "距离家里云上次离线时间过短，请稍后再试".into(),
                         }),
                     );
                 }

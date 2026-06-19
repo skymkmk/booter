@@ -90,14 +90,25 @@ pub async fn start_quic_server(state: AppState) {
 
             if should_shutdown {
                 let mut companions = state_bg.companions.lock().await;
+                let mut sent_count = 0;
                 for (cid, tx) in companions.iter_mut() {
                     info!("Sending auto-shutdown to companion: {}", cid);
-                    let _ = tx.try_send(ServerToCompanion::Command {
+                    if tx.try_send(ServerToCompanion::Command {
                         target_id: None,
                         cmd: "shutdown".into(),
-                    });
+                    }).is_ok() {
+                        sent_count += 1;
+                    }
                 }
                 drop(companions); // Explicitly drop before broadcasting
+
+                if sent_count > 0 {
+                    let _ = sqlx::query(
+                        "INSERT INTO user_logs (email, action) VALUES ('system', 'AutoShutdown')",
+                    )
+                    .execute(&state_bg.db)
+                    .await;
+                }
 
                 broadcast_node_status(&state_bg).await;
             }
@@ -174,6 +185,32 @@ pub async fn broadcast_node_status(state: &AppState) {
         }
     }
 
+    let absolute_cooldown_record: Option<(String,)> = sqlx::query_as(
+        "SELECT value FROM system_config WHERE key = 'absolute_boot_cooldown_minutes'",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None);
+    let absolute_cooldown_minutes = absolute_cooldown_record
+        .and_then(|(v,)| v.parse::<u32>().ok())
+        .unwrap_or(0);
+
+    let mut absolute_cooldown_deadline = None;
+    if absolute_cooldown_minutes > 0 {
+        if let Some(last_time) = *state.last_offline_time.lock().await {
+            let elapsed_secs = last_time.elapsed().as_secs_f64();
+            let total_secs = (absolute_cooldown_minutes * 60) as f64;
+            if elapsed_secs < total_secs {
+                let remaining = total_secs - elapsed_secs;
+                let sys_now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                absolute_cooldown_deadline = Some(sys_now + remaining as i64);
+            }
+        }
+    }
+
     let mut dashboards = state.dashboards.lock().await;
     for (_, dash_tx) in dashboards.iter_mut() {
         let _ = dash_tx
@@ -182,6 +219,7 @@ pub async fn broadcast_node_status(state: &AppState) {
                 shutdown_deadline,
                 forbidden_time: forbidden_time.clone(),
                 cooldown_deadline,
+                absolute_cooldown_deadline,
             })
             .await;
     }
@@ -481,6 +519,10 @@ async fn handle_quic_connection(connection: quinn::Connection, state: AppState) 
                     if should_remove {
                         lock.remove(&cid);
                         state_clone.active_services.lock().await.remove(&cid);
+                        if lock.is_empty() {
+                            *state_clone.last_offline_time.lock().await =
+                                Some(std::time::Instant::now());
+                        }
                     }
                     drop(lock);
 

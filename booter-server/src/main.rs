@@ -39,6 +39,7 @@ pub struct AppState {
     pub otps: Arc<Mutex<HashMap<String, (String, std::time::Instant)>>>,
     pub node_shutdown_deadline: Arc<Mutex<Option<std::time::Instant>>>,
     pub last_boot_time: Arc<Mutex<Option<std::time::Instant>>>,
+    pub last_offline_time: Arc<Mutex<Option<std::time::Instant>>>,
     pub pending_mijia_logins: Arc<Mutex<HashMap<String, PendingMijiaLogin>>>,
 }
 
@@ -100,6 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         otps: Arc::new(Mutex::new(HashMap::new())),
         node_shutdown_deadline: Arc::new(Mutex::new(None)),
         last_boot_time: Arc::new(Mutex::new(None)),
+        last_offline_time: Arc::new(Mutex::new(None)),
         pending_mijia_logins: Arc::new(Mutex::new(HashMap::new())),
     };
 

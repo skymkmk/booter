@@ -14,7 +14,16 @@ export type ServerToDashboard =
       };
     }
   | { type: "command_result"; payload: { success: boolean; message: string } }
-  | { type: "node_status"; payload: { online_count: number, shutdown_deadline: number | null, forbidden_time: string | null, cooldown_deadline: number | null } };
+  | {
+      type: "node_status";
+      payload: {
+        online_count: number;
+        shutdown_deadline: number | null;
+        forbidden_time: string | null;
+        cooldown_deadline: number | null;
+        absolute_cooldown_deadline: number | null;
+      };
+    };
 
 export function useWebTransport(token: string | null, onMessage?: (msg: ServerToDashboard) => void) {
   const [isConnected, setIsConnected] = useState(false);

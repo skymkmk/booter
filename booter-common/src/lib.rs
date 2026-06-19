@@ -58,6 +58,7 @@ pub enum ServerToDashboard {
         shutdown_deadline: Option<i64>,
         forbidden_time: Option<String>,
         cooldown_deadline: Option<i64>,
+        absolute_cooldown_deadline: Option<i64>,
     },
     CommandResult {
         success: bool,

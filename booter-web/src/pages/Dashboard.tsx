@@ -16,6 +16,8 @@ export default function Dashboard() {
   const [forbiddenTime, setForbiddenTime] = useState<string | null>(null);
   const [cooldownDeadline, setCooldownDeadline] = useState<number | null>(null);
   const [cooldownCountdown, setCooldownCountdown] = useState<string>('');
+  const [absoluteCooldownDeadline, setAbsoluteCooldownDeadline] = useState<number | null>(null);
+  const [absoluteCooldownCountdown, setAbsoluteCooldownCountdown] = useState<string>('');
   
   const [confirmWake, setConfirmWake] = useState(false);
   const [confirmShutdown, setConfirmShutdown] = useState(false);
@@ -26,6 +28,7 @@ export default function Dashboard() {
       setShutdownDeadline(msg.payload.shutdown_deadline || null);
       setForbiddenTime(msg.payload.forbidden_time || null);
       setCooldownDeadline(msg.payload.cooldown_deadline || null);
+      setAbsoluteCooldownDeadline(msg.payload.absolute_cooldown_deadline || null);
     } else if (msg.type === 'command_result') {
       if (msg.payload.success) {
         toast.success(msg.payload.message);
@@ -79,6 +82,27 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [cooldownDeadline, isOnline]);
 
+  useEffect(() => {
+    let interval: number;
+    if (absoluteCooldownDeadline && !isOnline) {
+      interval = window.setInterval(() => {
+        const now = Math.floor(Date.now() / 1000);
+        const remaining = absoluteCooldownDeadline - now;
+        if (remaining <= 0) {
+          setAbsoluteCooldownCountdown('');
+        } else {
+          const h = Math.floor(remaining / 3600);
+          const m = Math.floor((remaining % 3600) / 60);
+          const s = remaining % 60;
+          setAbsoluteCooldownCountdown(`${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`);
+        }
+      }, 1000);
+    } else {
+      setAbsoluteCooldownCountdown('');
+    }
+    return () => clearInterval(interval);
+  }, [absoluteCooldownDeadline, isOnline]);
+
   const handleShutdown = () => {
     if (!confirmShutdown) {
       setConfirmShutdown(true);
@@ -110,20 +134,16 @@ export default function Dashboard() {
     }
   };
 
-  // 颜色联动逻辑
-  // 如果 WebTransport 未连接，显示灰色离线状态
-  const isWsOnline = isConnected;
-  
   let bgLightColor = "bg-slate-300";
   let statusColor = "bg-slate-400";
   let statusText = "text-slate-500";
-  let statusLabel = "服务端离线";
+  let statusLabel = "启动器离线";
 
-  if (isWsOnline) {
+  if (isConnected) {
     bgLightColor = isOnline ? "bg-emerald-400" : "bg-rose-400";
     statusColor = isOnline ? "bg-emerald-500" : "bg-rose-500";
     statusText = isOnline ? "text-emerald-600" : "text-rose-600";
-    statusLabel = isOnline ? "节点在线" : "节点休眠";
+    statusLabel = isOnline ? "家里云在线" : "家里云关机";
   }
 
   return (
@@ -163,12 +183,12 @@ export default function Dashboard() {
             <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-8 transition-colors">系统状态</h2>
             <div className="space-y-6">
               <div className="flex justify-between items-center p-4 bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800 rounded-xl transition-colors">
-                <span className="text-slate-600 dark:text-slate-400 font-medium">宿主机节点</span>
+                <span className="text-slate-600 dark:text-slate-400 font-medium">状态</span>
                 <span
                   className={`flex items-center gap-2 ${statusText} font-medium transition-colors duration-1000`}
                 >
                   <span
-                    className={`w-2.5 h-2.5 rounded-full ${statusColor} ${isWsOnline ? 'animate-[pulse_4s_ease-in-out_infinite]' : ''} transition-colors duration-1000`}
+                    className={`w-2.5 h-2.5 rounded-full ${statusColor} ${isConnected ? 'animate-[pulse_4s_ease-in-out_infinite]' : ''} transition-colors duration-1000`}
                   ></span>
                   {statusLabel}
                 </span>
@@ -206,13 +226,15 @@ export default function Dashboard() {
                   </span>
                 </div>
               )}
-              
-              <div className="flex justify-between items-center p-4 bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800 rounded-xl transition-colors">
-                <span className="text-slate-600 dark:text-slate-400 font-medium">WebTransport 连接状态</span>
-                <span className={`text-sm font-semibold ${isConnected ? "text-emerald-500" : "text-rose-500"}`}>
-                  {isConnected ? '已连接' : '已断开'}
-                </span>
-              </div>
+
+              {absoluteCooldownCountdown && (
+                <div className="flex justify-between items-center p-4 bg-slate-50 dark:bg-slate-900/50 border border-slate-100 dark:border-slate-800 rounded-xl transition-colors">
+                  <span className="text-slate-600 dark:text-slate-400 font-medium">绝对开机冷却倒计时</span>
+                  <span className="font-mono text-xl text-amber-500 font-bold tracking-wider">
+                    {absoluteCooldownCountdown}
+                  </span>
+                </div>
+              )}
             </div>
           </GlassCard>
 

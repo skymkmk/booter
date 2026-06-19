@@ -28,6 +28,7 @@ export default function Admin() {
 
   // Boot Restrictions State
   const [cooldownMinutes, setCooldownMinutes] = useState<number>(0);
+  const [absoluteCooldownMinutes, setAbsoluteCooldownMinutes] = useState<number>(0);
   const [forbiddenTime, setForbiddenTime] = useState<string>('');
   const [savingRestrictions, setSavingRestrictions] = useState(false);
   const [resettingCooldown, setResettingCooldown] = useState(false);
@@ -97,6 +98,7 @@ export default function Admin() {
         });
         if (data.success) {
           setCooldownMinutes(data.cooldown_minutes);
+          setAbsoluteCooldownMinutes(data.absolute_cooldown_minutes);
           setForbiddenTime(data.forbidden_time);
         }
       } catch (err) {
@@ -258,7 +260,11 @@ export default function Admin() {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ cooldown_minutes: Number(cooldownMinutes), forbidden_time: forbiddenTime })
+        body: JSON.stringify({
+          cooldown_minutes: Number(cooldownMinutes),
+          absolute_cooldown_minutes: Number(absoluteCooldownMinutes),
+          forbidden_time: forbiddenTime
+        })
       });
     } catch (err) {
       console.error(err);
@@ -397,7 +403,7 @@ export default function Admin() {
             {/* Boot Restrictions Panel */}
             <GlassCard className="p-6 md:p-10">
               <h2 className="text-2xl font-bold text-slate-900 dark:text-white mb-2 transition-colors">开机访问限制（仅针对普通用户）</h2>
-              <p className="text-slate-500 dark:text-slate-400 mb-8 transition-colors">设置普通用户开机冷却时间及禁用时段（管理员不受限制）。</p>
+              <p className="text-slate-500 dark:text-slate-400 mb-8 transition-colors">设置普通用户基于上次开机、上次离线的两类冷却时间及禁用时段（管理员不受限制）。</p>
               
               <form onSubmit={handleSaveBootRestrictions} className="flex flex-col gap-6">
                 <div>
@@ -412,6 +418,20 @@ export default function Admin() {
                     placeholder="0 为不限制"
                   />
                   <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">距离上次开机小于此时间则拒绝开机。</p>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">绝对开机冷却 (分钟)</label>
+                  <input
+                    type="number"
+                    step="1"
+                    min="0"
+                    value={absoluteCooldownMinutes}
+                    onChange={(e) => setAbsoluteCooldownMinutes(Math.floor(Number(e.target.value)))}
+                    className="w-full bg-white/50 dark:bg-slate-900/50 border border-slate-200 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all"
+                    placeholder="0 为不限制"
+                  />
+                  <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">距离家里云最后一次离线小于此时间则拒绝普通用户开机。</p>
                 </div>
 
                 <div>

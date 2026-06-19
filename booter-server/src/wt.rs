@@ -96,17 +96,16 @@ async fn handle_wt_session(session: Session, state: AppState) {
                         return;
                     }
 
-                    let authenticated_role =
+                    let authenticated_user =
                         match serde_json::from_str::<DashboardToServer>(&first_line) {
                             Ok(DashboardToServer::Auth { token }) => {
                                 crate::api::verify_token_impl(&token, None, &state.db)
                                     .await
-                                    .map(|(role, _)| role)
                             }
                             _ => None,
                         };
 
-                    let Some(_role) = authenticated_role else {
+                    let Some((_role, authenticated_email)) = authenticated_user else {
                         warn!("WebTransport stream authentication failed");
                         let _ = send_stream.write_all(b"{\"type\":\"command_result\",\"payload\":{\"success\":false,\"message\":\"Authentication failed\"}}\n").await;
                         return;
@@ -171,12 +170,39 @@ async fn handle_wt_session(session: Session, state: AppState) {
                         }
                     }
 
+                    let absolute_cooldown_record: Option<(String,)> = sqlx::query_as(
+                        "SELECT value FROM system_config WHERE key = 'absolute_boot_cooldown_minutes'",
+                    )
+                    .fetch_optional(&state.db)
+                    .await
+                    .unwrap_or(None);
+                    let absolute_cooldown_minutes = absolute_cooldown_record
+                        .and_then(|(v,)| v.parse::<u32>().ok())
+                        .unwrap_or(0);
+
+                    let mut absolute_cooldown_deadline = None;
+                    if absolute_cooldown_minutes > 0 {
+                        if let Some(last_time) = *state.last_offline_time.lock().await {
+                            let elapsed_secs = last_time.elapsed().as_secs_f64();
+                            let total_secs = (absolute_cooldown_minutes * 60) as f64;
+                            if elapsed_secs < total_secs {
+                                let remaining = total_secs - elapsed_secs;
+                                let sys_now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs() as i64;
+                                absolute_cooldown_deadline = Some(sys_now + remaining as i64);
+                            }
+                        }
+                    }
+
                     let _ = tx
                         .send(ServerToDashboard::NodeStatus {
                             online_count: c_len,
                             shutdown_deadline,
                             forbidden_time,
                             cooldown_deadline,
+                            absolute_cooldown_deadline,
                         })
                         .await;
 
@@ -252,14 +278,27 @@ async fn handle_wt_session(session: Session, state: AppState) {
                                                                 "Forwarding command to companion {}",
                                                                 cid
                                                             );
-                                                            let _ = sender
+                                                            if sender
                                                                 .send(ServerToCompanion::Command {
                                                                     target_id: target_id.clone(),
                                                                     cmd: cmd.clone(),
                                                                 })
-                                                                .await;
-                                                            sent_count += 1;
+                                                                .await
+                                                                .is_ok()
+                                                            {
+                                                                sent_count += 1;
+                                                            }
                                                         }
+                                                    }
+                                                    drop(c_map);
+
+                                                    if sent_count > 0 {
+                                                        let _ = sqlx::query(
+                                                            "INSERT INTO user_logs (email, action) VALUES (?, 'Shutdown')",
+                                                        )
+                                                        .bind(&authenticated_email)
+                                                        .execute(&state.db)
+                                                        .await;
                                                     }
 
                                                     let _ = tx
